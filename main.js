@@ -330,6 +330,30 @@ function extendPrefixWords(text, start, n) {
   return cursor;
 }
 
+/**
+ * Source-level ranges occupied by Markdown image syntax on a line:
+ *   ![[path.png]]   (Obsidian wikilink embed, optionally |size)
+ *   ![alt](path)    (standard image)
+ * Used in reading mode to drop matches that fall inside an image, since the
+ * rendered preview shows an <img>, not the link text.
+ */
+function imageSpansIn(line) {
+  const spans = [];
+  let re = /!\[\[[^\]\n]*\]\]/g;
+  let m;
+  while ((m = re.exec(line)) !== null)
+    spans.push([m.index, m.index + m[0].length]);
+  re = /!\[[^\]\n]*\]\([^)\n]*\)/g;
+  while ((m = re.exec(line)) !== null)
+    spans.push([m.index, m.index + m[0].length]);
+  return spans;
+}
+
+function isInsideSpan(ch, spans) {
+  for (const [a, b] of spans) if (ch >= a && ch < b) return true;
+  return false;
+}
+
 /** For a table row, return the previous cell's text as a semantic anchor. */
 function previousCellOf(line, ch) {
   if (!isTableRow(line)) return null;
@@ -648,6 +672,19 @@ class FindBar {
     const text = this.editor.getValue();
     this.docLines = text.split("\n");
     this.matches = findSourceMatches(this.docLines, this.matcher);
+    // Reading mode: image links render as <img>, so their alt/path text isn't
+    // visible — drop matches that fall inside Markdown image syntax.
+    if (this.domMode && this.matches.length) {
+      const cache = new Map();
+      this.matches = this.matches.filter((m) => {
+        let spans = cache.get(m.line);
+        if (!spans) {
+          spans = imageSpansIn(this.docLines[m.line] || "");
+          cache.set(m.line, spans);
+        }
+        return !isInsideSpan(m.ch, spans);
+      });
+    }
     this.current = this.matches.length ? 0 : -1;
     this.currentDomRange = null;
     this.renderList();
