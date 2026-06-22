@@ -769,25 +769,25 @@ class FindBar {
         sn.createSpan({ cls: "tf-col", text: prevCell + "·" });
       }
 
-      // Snippet starts at the word containing the hit. If that prefix is too
-      // short to be informative ("Cavity)" tells you nothing), pull in 1–2 more
-      // words of context so "Ventral Cavity)" / "(Ventral Cavity)" surface.
+      // Snippet starts at the word containing the hit. Only when the hit IS the
+      // whole word (inWord == 0, e.g. "Cavity" matching "Cavity") do we extend
+      // backward for more context like "Ventral Cavity". When the hit sits
+      // inside a longer word ("voluntary" inside "Involuntary"), the word
+      // itself is already enough context — extending would walk past it into a
+      // neighboring match.
       let s = wordStartBefore(source, hitIdx);
-      const inWord = hitIdx - s;
-      if (inWord < 1) s = extendPrefixWords(source, s, 2);
-      else if (inWord < 3) s = extendPrefixWords(source, s, 1);
+      if (hitIdx - s === 0) s = extendPrefixWords(source, s, 2);
       const e = Math.min(source.length, hitIdx + hitLen + 80);
       const win = source.slice(s, e);
       if (s > 0) sn.appendText("…");
-      let cursor = 0;
-      for (const wm of findAll(win, this.matcher)) {
-        if (wm.index > cursor) sn.appendText(win.slice(cursor, wm.index));
-        sn.createEl("strong", {
-          text: win.slice(wm.index, wm.index + wm.length),
-        });
-        cursor = wm.index + wm.length;
-      }
-      if (cursor < win.length) sn.appendText(win.slice(cursor));
+      // Bold only the hit this entry represents — other matches that happen to
+      // fall in the same window are left as plain text so the user can tell
+      // which match a row stands for.
+      const ls = hitIdx - s;
+      const le = ls + hitLen;
+      if (ls > 0) sn.appendText(win.slice(0, ls));
+      sn.createEl("strong", { text: win.slice(ls, le) });
+      if (le < win.length) sn.appendText(win.slice(le));
       if (e < source.length) sn.appendText("…");
 
       if (head) {
