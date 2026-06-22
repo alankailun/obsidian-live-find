@@ -287,28 +287,47 @@ function resolveTableByPoint(cm, off, lines, m, matcher) {
 }
 
 /**
- * Walk backward from `idx` in `text` until we hit a separator (whitespace, |,
- * full-width space, CJK punctuation, or a CJK character). The returned index is
- * the start of the "word" containing idx — so a hit inside "Involuntary" gives
- * the 'I', not the inside of the word.
+ * True if `ch` should be treated as a "word" boundary for snippet purposes:
+ * whitespace, table pipes, CJK punctuation, full-width forms, or any CJK char
+ * (each Chinese character is its own word).
  */
+function isWordSep(ch) {
+  if (!ch) return true;
+  if (/\s/.test(ch)) return true;
+  if (ch === "|" || ch === "│") return true;
+  const code = ch.charCodeAt(0);
+  if (code >= 0x3000 && code <= 0x303f) return true; // CJK symbols & punctuation
+  if (code >= 0xff00 && code <= 0xffef) return true; // full-width forms
+  if (code >= 0x4e00 && code <= 0x9fff) return true; // CJK unified ideographs
+  return false;
+}
+
+/** Start of the "word" containing position `idx` in `text`. */
 function wordStartBefore(text, idx) {
   let i = idx;
-  while (i > 0) {
-    const ch = text.charAt(i - 1);
-    const code = ch.charCodeAt(0);
-    if (/\s/.test(ch)) break;
-    if (ch === "|" || ch === "│") break;
-    // CJK characters and common CJK punctuation form their own "word" boundary.
-    if (
-      (code >= 0x3000 && code <= 0x303f) || // CJK symbols & punctuation
-      (code >= 0xff00 && code <= 0xffef) || // full-width forms
-      (code >= 0x4e00 && code <= 0x9fff) // CJK unified ideographs
-    )
-      break;
-    i--;
-  }
+  while (i > 0 && !isWordSep(text.charAt(i - 1))) i--;
   return i;
+}
+
+/**
+ * Extend `start` backward by up to `n` more whole words so the snippet has real
+ * context: skip a run of separators, then walk through one more word. Stops at
+ * hard boundaries (CJK char, table pipe, line start).
+ */
+function extendPrefixWords(text, start, n) {
+  let cursor = start;
+  while (n > 0 && cursor > 0) {
+    let p = cursor;
+    while (p > 0 && isWordSep(text.charAt(p - 1)) && text.charAt(p - 1) !== "|") p--;
+    if (p === cursor) break; // no separators to skip
+    if (p > 0 && text.charAt(p - 1) === "|") break; // don't cross table cells
+    const end = p;
+    while (p > 0 && !isWordSep(text.charAt(p - 1))) p--;
+    if (p === end) break;
+    cursor = p;
+    n--;
+  }
+  return cursor;
 }
 
 /** For a table row, return the previous cell's text as a semantic anchor. */
@@ -750,7 +769,13 @@ class FindBar {
         sn.createSpan({ cls: "tf-col", text: prevCell + "·" });
       }
 
-      const s = wordStartBefore(source, hitIdx);
+      // Snippet starts at the word containing the hit. If that prefix is too
+      // short to be informative ("Cavity)" tells you nothing), pull in 1–2 more
+      // words of context so "Ventral Cavity)" / "(Ventral Cavity)" surface.
+      let s = wordStartBefore(source, hitIdx);
+      const inWord = hitIdx - s;
+      if (inWord < 1) s = extendPrefixWords(source, s, 2);
+      else if (inWord < 3) s = extendPrefixWords(source, s, 1);
       const e = Math.min(source.length, hitIdx + hitLen + 80);
       const win = source.slice(s, e);
       if (s > 0) sn.appendText("…");
