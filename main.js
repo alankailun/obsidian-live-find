@@ -100,11 +100,18 @@ function findRenderedMatches(root, matcher) {
   });
   let node;
   while ((node = walker.nextNode())) {
-    for (const mt of findAll(node.nodeValue, matcher)) {
+    const text = node.nodeValue;
+    for (const mt of findAll(text, matcher)) {
       const range = document.createRange();
       range.setStart(node, mt.index);
       range.setEnd(node, mt.index + mt.length);
-      matches.push({ range });
+      matches.push({
+        range,
+        el: node.parentElement,
+        text,
+        index: mt.index,
+        length: mt.length,
+      });
     }
   }
   return matches;
@@ -279,6 +286,100 @@ function resolveTableByPoint(cm, off, lines, m, matcher) {
   }
 }
 
+/**
+ * Walk backward from `idx` in `text` until we hit a separator (whitespace, |,
+ * full-width space, CJK punctuation, or a CJK character). The returned index is
+ * the start of the "word" containing idx — so a hit inside "Involuntary" gives
+ * the 'I', not the inside of the word.
+ */
+function wordStartBefore(text, idx) {
+  let i = idx;
+  while (i > 0) {
+    const ch = text.charAt(i - 1);
+    const code = ch.charCodeAt(0);
+    if (/\s/.test(ch)) break;
+    if (ch === "|" || ch === "│") break;
+    // CJK characters and common CJK punctuation form their own "word" boundary.
+    if (
+      (code >= 0x3000 && code <= 0x303f) || // CJK symbols & punctuation
+      (code >= 0xff00 && code <= 0xffef) || // full-width forms
+      (code >= 0x4e00 && code <= 0x9fff) // CJK unified ideographs
+    )
+      break;
+    i--;
+  }
+  return i;
+}
+
+/** For a table row, return the previous cell's text as a semantic anchor. */
+function previousCellOf(line, ch) {
+  if (!isTableRow(line)) return null;
+  const cells = parseCells(line);
+  for (let c = 0; c < cells.length; c++) {
+    const cell = cells[c];
+    if (ch >= cell.start && ch <= cell.start + cell.text.length) {
+      for (let p = c - 1; p >= 0; p--) {
+        const t = cells[p].text.trim();
+        if (t) return t.replace(/[*_`]/g, "").replace(/\s+/g, " ").slice(0, 24);
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Walk up source lines to find the nearest Markdown heading above `lineIdx`. */
+function nearestHeading(lines, lineIdx) {
+  for (let i = lineIdx; i >= 0; i--) {
+    const ln = lines[i];
+    const m = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(ln);
+    if (m) return { level: m[1].length, text: m[2] };
+  }
+  return null;
+}
+
+/** Strip common Markdown noise from a source line for clean list snippets. */
+function cleanSnippet(line) {
+  return line
+    .replace(/^[\s>#*+\-]+/, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\|/g, " ")
+    .replace(/[│├└─]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Reading mode: map a source match to its exact rendered range by content.
+ * Find the rendered element (table row / heading / paragraph / list item) whose
+ * full text equals the source line, then take the k-th query occurrence in it
+ * (k = occurrences before the match within the same source line). Robust to
+ * virtualization and duplicate cells (ordering is within one line).
+ */
+function resolveReadingCurrentRange(root, lines, m, matcher) {
+  try {
+    if (!root) return null;
+    const line = lines[m.line] || "";
+    let kInLine = 0;
+    for (const _ of findAll(line.slice(0, m.ch), matcher)) kInLine++;
+    const want = cleanSnippet(line).replace(/\s+/g, "").toLowerCase();
+    if (!want) return null;
+    const els = root.querySelectorAll(
+      "tr, p, li, h1, h2, h3, h4, h5, h6, dd, dt, td, th, blockquote"
+    );
+    for (const el of els) {
+      const got = (el.textContent || "").replace(/\s+/g, "").toLowerCase();
+      if (got === want) {
+        const r = findKthOccurrenceRange(el, matcher, kInLine);
+        if (r) return r;
+      }
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 /* ----------------------------- find bar ----------------------------- */
 
 class FindBar {
@@ -292,6 +393,8 @@ class FindBar {
     this.matcher = null;
     this.caseSensitive = false;
     this.useRegex = false;
+    this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
+    this.currentDomRange = null; // anchored current range in reading mode
     this.barEl = null;
     this.resultsEl = null;
   }
@@ -411,10 +514,60 @@ class FindBar {
     }
   }
 
+  domApply(dom, currentRange) {
+    CSS.highlights.set(HL_ALL, new Highlight(...dom.map((d) => d.range)));
+    if (currentRange) {
+      const hl = new Highlight(currentRange);
+      hl.priority = 1;
+      CSS.highlights.set(HL_CURRENT, hl);
+    } else {
+      CSS.highlights.delete(HL_CURRENT);
+    }
+  }
+
   refreshHighlights() {
     if (!(window.CSS && CSS.highlights && window.Highlight)) return;
     if (!this.query || !this.matcher || this.matcher.invalid)
       return this.clearHighlights();
+
+    // Reading mode: list/count/nav come from the source (complete). The current
+    // match is mapped to the rendered DOM by content (exact, even with duplicate
+    // cells). Falls back to the kept range, then nearest-to-top.
+    if (this.domMode) {
+      const root = getRenderRoot(this.view);
+      const dom = findRenderedMatches(root, this.matcher);
+      const m = this.matches[this.current];
+      let cur = m
+        ? resolveReadingCurrentRange(root, this.docLines, m, this.matcher)
+        : null;
+      if (
+        !cur &&
+        this.currentDomRange &&
+        this.currentDomRange.startContainer &&
+        this.currentDomRange.startContainer.isConnected
+      )
+        cur = this.currentDomRange;
+      if (!cur && dom.length) {
+        const scroller = getScroller(this.view);
+        const rect = scroller ? scroller.getBoundingClientRect() : { top: 0 };
+        const targetY = rect.top + 80;
+        let best = null;
+        let bd = Infinity;
+        for (const d of dom) {
+          const r = d.range.getBoundingClientRect();
+          const dist = Math.abs(r.top - targetY);
+          if (dist < bd) {
+            bd = dist;
+            best = d;
+          }
+        }
+        cur = best ? best.range : null;
+      }
+      this.currentDomRange = cur;
+      this.domApply(dom, cur);
+      return;
+    }
+
     const root = getRenderRoot(this.view);
     const dom = findRenderedMatches(root, this.matcher);
     CSS.highlights.set(HL_ALL, new Highlight(...dom.map((d) => d.range)));
@@ -470,11 +623,14 @@ class FindBar {
 
   search(query) {
     this.query = query;
+    this.matcher = buildMatcher(query, this.caseSensitive, this.useRegex);
+    this.domMode = this.view.getMode() === "preview";
+    // Both modes: complete whole-note search from the source.
     const text = this.editor.getValue();
     this.docLines = text.split("\n");
-    this.matcher = buildMatcher(query, this.caseSensitive, this.useRegex);
     this.matches = findSourceMatches(this.docLines, this.matcher);
     this.current = this.matches.length ? 0 : -1;
+    this.currentDomRange = null;
     this.renderList();
     this.updateCount();
     if (this.current >= 0) this.jumpToCurrent();
@@ -492,6 +648,19 @@ class FindBar {
   jumpToCurrent() {
     const m = this.matches[this.current];
     if (!m) return;
+    if (this.domMode) {
+      // Scroll the rendered preview to the match's source line, then let
+      // refreshHighlights map the current match by content.
+      try {
+        const pm = this.view.previewMode || this.view.currentMode;
+        if (pm && typeof pm.applyScroll === "function") pm.applyScroll(m.line);
+      } catch (e) {}
+      this.currentDomRange = null; // recompute fresh for the new selection
+      this.refreshHighlights();
+      setTimeout(() => this.refreshHighlights(), 90);
+      setTimeout(() => this.refreshHighlights(), 220);
+      return;
+    }
     const from = { line: m.line, ch: m.ch };
     const to = { line: m.line, ch: m.ch + m.len };
     try {
@@ -536,21 +705,70 @@ class FindBar {
     this.matches.forEach((m, i) => {
       const row = el.createDiv({ cls: "tf-row" });
       if (i === this.current) row.addClass("is-active");
-      row.createSpan({ cls: "tf-line", text: `行 ${m.line + 1}` });
-      const sn = row.createSpan({ cls: "tf-snippet" });
 
-      // Context window around the match, with the hit bolded.
-      const s = Math.max(0, m.ch - 24);
-      const e = Math.min(m.lineText.length, m.ch + m.len + 60);
-      let before = m.lineText.slice(s, m.ch);
-      const hit = m.lineText.slice(m.ch, m.ch + m.len);
-      const after = m.lineText.slice(m.ch + m.len, e);
-      if (s === 0) before = before.replace(/^\s+/, "");
+      // Second line: nearest heading above this match (always on).
+      const head = nearestHeading(this.docLines, m.line);
+      if (head) row.addClass("has-head");
+
+      const main = row.createDiv({ cls: "tf-main" });
+      main.createSpan({ cls: "tf-line", text: `行 ${m.line + 1}` });
+      const sn = main.createSpan({ cls: "tf-snippet" });
+
+      // Both modes: snippet starts at the *word boundary before this exact hit*
+      // so a hit inside "Involuntary" reads "Involuntary…" not "voluntary…".
+      const source = this.domMode ? cleanSnippet(m.lineText) : m.lineText;
+      // In reading mode the source line is cleaned, so locate the same hit in
+      // the cleaned text by occurrence index within the line.
+      let hitIdx, hitLen;
+      if (this.domMode) {
+        let kInLine = 0;
+        for (const _ of findAll(m.lineText.slice(0, m.ch), this.matcher))
+          kInLine++;
+        const all = findAll(source, this.matcher);
+        const pick = all[kInLine] || all[0];
+        if (!pick) {
+          sn.appendText(source.slice(0, 100));
+          row.onclick = () => {
+            this.current = i;
+            this.jumpToCurrent();
+            this.updateCount();
+            this.markActiveRow();
+          };
+          return;
+        }
+        hitIdx = pick.index;
+        hitLen = pick.length;
+      } else {
+        hitIdx = m.ch;
+        hitLen = m.len;
+      }
+
+      // A: for table-row hits, prepend the previous cell as a semantic anchor
+      // (e.g. column label) so duplicate cells in the list are distinguishable.
+      const prevCell = previousCellOf(m.lineText, m.ch);
+      if (prevCell) {
+        sn.createSpan({ cls: "tf-col", text: prevCell + "·" });
+      }
+
+      const s = wordStartBefore(source, hitIdx);
+      const e = Math.min(source.length, hitIdx + hitLen + 80);
+      const win = source.slice(s, e);
       if (s > 0) sn.appendText("…");
-      sn.appendText(before);
-      sn.createEl("strong", { text: hit });
-      sn.appendText(after);
-      if (e < m.lineText.length) sn.appendText("…");
+      let cursor = 0;
+      for (const wm of findAll(win, this.matcher)) {
+        if (wm.index > cursor) sn.appendText(win.slice(cursor, wm.index));
+        sn.createEl("strong", {
+          text: win.slice(wm.index, wm.index + wm.length),
+        });
+        cursor = wm.index + wm.length;
+      }
+      if (cursor < win.length) sn.appendText(win.slice(cursor));
+      if (e < source.length) sn.appendText("…");
+
+      if (head) {
+        const clean = head.text.replace(/[*_`]/g, "").trim();
+        row.createDiv({ cls: "tf-head" }).setText(clean);
+      }
 
       row.onclick = () => {
         this.current = i;
@@ -639,12 +857,18 @@ module.exports = class LiveFindPlugin extends Plugin {
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); padding: 4px;
       }
       .tf-results .tf-row {
-        display: flex; align-items: baseline; gap: 6px;
+        display: flex; flex-direction: column; gap: 2px;
         padding: 5px 8px; cursor: pointer; border-radius: 6px; font-size: 13px;
+      }
+      .tf-results .tf-main {
+        display: flex; align-items: baseline; gap: 6px;
         white-space: nowrap; overflow: hidden;
       }
       .tf-results .tf-snippet { overflow: hidden; text-overflow: ellipsis; }
       .tf-results .tf-snippet strong { color: var(--text-accent); }
+      .tf-results .tf-col {
+        color: var(--text-muted); margin-right: 2px;
+      }
       .tf-results .tf-row:hover { background: var(--background-modifier-hover); }
       .tf-results .tf-row.is-active {
         background: var(--background-modifier-active-hover, var(--background-modifier-hover));
@@ -652,6 +876,11 @@ module.exports = class LiveFindPlugin extends Plugin {
       .tf-results .tf-line {
         color: var(--text-faint); flex: 0 0 auto;
         font-variant-numeric: tabular-nums;
+      }
+      .tf-results .tf-head {
+        color: var(--text-faint); font-size: 11px;
+        padding-left: 38px; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap;
       }
     `;
     document.head.appendChild(this.styleEl);
