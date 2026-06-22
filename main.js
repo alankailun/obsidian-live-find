@@ -384,6 +384,8 @@ function nearestHeading(lines, lineIdx) {
 /** Strip common Markdown noise from a source line for clean list snippets. */
 function cleanSnippet(line) {
   return line
+    .replace(/!\[\[[^\]\n]*\]\]/g, "") // Obsidian image embeds
+    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "") // standard images
     .replace(/^[\s>#*+\-]+/, "")
     .replace(/[*_`]/g, "")
     .replace(/\|/g, " ")
@@ -403,8 +405,13 @@ function resolveReadingCurrentRange(root, lines, m, matcher) {
   try {
     if (!root) return null;
     const line = lines[m.line] || "";
+    // Images render as <img>, not text — so they're absent from textContent.
+    // Count only non-image preceding matches to align with what's in the DOM.
+    const spans = imageSpansIn(line);
     let kInLine = 0;
-    for (const _ of findAll(line.slice(0, m.ch), matcher)) kInLine++;
+    for (const mt of findAll(line.slice(0, m.ch), matcher)) {
+      if (!isInsideSpan(mt.index, spans)) kInLine++;
+    }
     const want = cleanSnippet(line).replace(/\s+/g, "").toLowerCase();
     if (!want) return null;
     const els = root.querySelectorAll(
@@ -502,6 +509,9 @@ class FindBar {
     this.onInput = debounce(() => this.search(this.input.value), 100);
     this.input.addEventListener("input", this.onInput);
     this.input.addEventListener("keydown", (e) => {
+      // Don't hijack keys while an IME is composing (e.g. Chinese pinyin Enter
+      // commits the candidate — we'd otherwise step the search).
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") {
         e.preventDefault();
         this.step(e.shiftKey ? -1 : 1);
@@ -522,6 +532,20 @@ class FindBar {
     if (this.scroller)
       this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
 
+    // Re-run search when the user toggles Source / Live Preview / Reading
+    // inside the same tab, so domMode, highlights and snippets stay accurate.
+    this.lastViewMode = this.view.getMode();
+    this.layoutEvt = this.plugin.app.workspace.on("layout-change", () => {
+      if (!this.barEl) return;
+      const mode = this.view.getMode();
+      if (mode === this.lastViewMode) return;
+      this.lastViewMode = mode;
+      this.scroller = getScroller(this.view);
+      if (this.query) this.search(this.query);
+      else this.clearHighlights();
+    });
+    this.plugin.registerEvent(this.layoutEvt);
+
     // Prefill from the current selection, like a browser / editor find.
     let initial = "";
     try {
@@ -541,6 +565,8 @@ class FindBar {
   close() {
     if (this.scroller && this.onScroll)
       this.scroller.removeEventListener("scroll", this.onScroll);
+    if (this.layoutEvt) this.plugin.app.workspace.offref(this.layoutEvt);
+    this.layoutEvt = null;
     this.clearHighlights();
     if (this.barEl) this.barEl.remove();
     if (this.resultsEl) this.resultsEl.remove();
@@ -548,6 +574,8 @@ class FindBar {
     this.resultsEl = null;
     this.matches = [];
     this.current = -1;
+    this.query = ""; // ensure late timers can't repaint highlights
+    this.matcher = null;
   }
 
   clearHighlights() {
@@ -569,6 +597,7 @@ class FindBar {
   }
 
   refreshHighlights() {
+    if (!this.barEl) return; // bail if a late timer fires after close()
     if (!(window.CSS && CSS.highlights && window.Highlight)) return;
     if (!this.query || !this.matcher || this.matcher.invalid)
       return this.clearHighlights();
@@ -777,9 +806,14 @@ class FindBar {
       // the cleaned text by occurrence index within the line.
       let hitIdx, hitLen;
       if (this.domMode) {
+        // Count matches BEFORE this one within the same line, skipping any
+        // inside image syntax (cleanSnippet strips them out of `source`, so
+        // the cleaned-source indexing must agree).
+        const spans = imageSpansIn(m.lineText);
         let kInLine = 0;
-        for (const _ of findAll(m.lineText.slice(0, m.ch), this.matcher))
-          kInLine++;
+        for (const mt of findAll(m.lineText.slice(0, m.ch), this.matcher)) {
+          if (!isInsideSpan(mt.index, spans)) kInLine++;
+        }
         const all = findAll(source, this.matcher);
         const pick = all[kInLine] || all[0];
         if (!pick) {
@@ -837,6 +871,7 @@ class FindBar {
         this.jumpToCurrent();
         this.updateCount();
         this.markActiveRow();
+        if (this.input) this.input.focus(); // keep keyboard nav alive
       };
     });
   }
