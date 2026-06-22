@@ -1,0 +1,9 @@
+{
+  "id": "table-finder",
+  "name": "Live Find",
+  "version": "0.3.0",
+  "minAppVersion": "1.4.0",
+  "description": "Chrome-style find bar for the current note. Whole-file search with a result list, jump-to-match, and highlight on rendered content (including tables) in Live Preview and Reading mode.",
+  "author": "Alan",
+  "isDesktopOnly": false
+}
