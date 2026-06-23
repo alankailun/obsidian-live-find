@@ -1,15 +1,15 @@
 "use strict";
 
-const { Plugin, MarkdownView, Notice, setIcon, PluginSettingTab, Setting } = require("obsidian");
+const { Plugin, MarkdownView, Notice, setIcon } = require("obsidian");
 
 const HL_ALL = "live-find-all";
 const HL_CURRENT = "live-find-current";
 
-const DEFAULT_SETTINGS = {
-  debugMode: false,
-  debounceMs: 100,
-  maxDomHighlights: 2500,
-};
+// Hard-coded knobs. Flip DEBUG to true while developing; the others are
+// reasonable defaults — adjust here if you ever need to tune them.
+const DEBUG = false;
+const DEBOUNCE_MS = 100;
+const MAX_DOM_HIGHLIGHTS = 2500;
 
 const SELECTORS = {
   readingRoot: ".markdown-reading-view, .markdown-preview-view",
@@ -17,24 +17,9 @@ const SELECTORS = {
   scroller: ".cm-scroller, .markdown-preview-view",
 };
 
-let DEBUG_ENABLED = false;
-
-function setDebugEnabled(enabled) {
-  DEBUG_ENABLED = !!enabled;
-}
-
 function debugWarn(where, err) {
-  if (!DEBUG_ENABLED) return;
+  if (!DEBUG) return;
   console.warn(`[LiveFind] ${where}`, err);
-}
-
-function safeCall(where, fn, fallback = null) {
-  try {
-    return fn();
-  } catch (e) {
-    debugWarn(where, e);
-    return fallback;
-  }
 }
 
 function debounce(fn, ms) {
@@ -958,7 +943,7 @@ class FindBar {
 
     this.onInput = debounce(
       () => this.search(this.input.value),
-      this.plugin.settings.debounceMs
+      DEBOUNCE_MS
     );
     this.input.addEventListener("input", this.onInput);
     this.onKeydown = (e) => {
@@ -983,7 +968,7 @@ class FindBar {
 
     this.onScroll = debounce(
       () => this.refreshHighlights(),
-      this.plugin.settings.debounceMs
+      DEBOUNCE_MS
     );
     this.updateScroller();
 
@@ -1005,7 +990,7 @@ class FindBar {
       const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
       if (active !== this.view) return;
       this.refreshCurrentSearch();
-    }, this.plugin.settings.debounceMs);
+    }, DEBOUNCE_MS);
     this.editorChangeEvt = this.plugin.app.workspace.on(
       "editor-change",
       this.onEditorChange
@@ -1132,7 +1117,7 @@ class FindBar {
       dom = limitDomHighlightsAroundCurrent(
         dom,
         cur,
-        this.plugin.settings.maxDomHighlights,
+        MAX_DOM_HIGHLIGHTS,
         scroller
       );
       this.domApply(dom, cur);
@@ -1192,7 +1177,7 @@ class FindBar {
     dom = limitDomHighlightsAroundCurrent(
       dom,
       currentRange,
-      this.plugin.settings.maxDomHighlights,
+      MAX_DOM_HIGHLIGHTS,
       scroller
     );
     this.domApply(dom, currentRange);
@@ -1362,70 +1347,8 @@ class FindBar {
 
 /* ----------------------------- plugin ----------------------------- */
 
-class LiveFindSettingTab extends PluginSettingTab {
-  constructor(app, plugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl("h2", { text: "Live Find settings" });
-
-    new Setting(containerEl)
-      .setName("Debug logging")
-      .setDesc("Log recoverable DOM / CodeMirror errors to the developer console.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.debugMode)
-          .onChange(async (value) => {
-            this.plugin.settings.debugMode = value;
-            setDebugEnabled(value);
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Debounce delay")
-      .setDesc("Delay in milliseconds before re-running search while typing or scrolling.")
-      .addText((text) =>
-        text
-          .setPlaceholder("100")
-          .setValue(String(this.plugin.settings.debounceMs))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 50 && n <= 1000) {
-              this.plugin.settings.debounceMs = Math.round(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Nearby DOM highlights")
-      .setDesc("Limits yellow highlights to the matches closest to the current result. Search count/list still uses the full note source.")
-      .addText((text) =>
-        text
-          .setPlaceholder("2500")
-          .setValue(String(this.plugin.settings.maxDomHighlights))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 100 && n <= 20000) {
-              this.plugin.settings.maxDomHighlights = Math.round(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-  }
-}
-
 module.exports = class LiveFindPlugin extends Plugin {
   async onload() {
-    await this.loadSettings();
-    setDebugEnabled(this.settings.debugMode);
-    this.addSettingTab(new LiveFindSettingTab(this.app, this));
-
     this.styleEl = document.createElement("style");
     this.styleEl.textContent = `
       ::highlight(${HL_ALL}) {
@@ -1540,14 +1463,6 @@ module.exports = class LiveFindPlugin extends Plugin {
         if (this.bar) this.bar.close();
       })
     );
-  }
-
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-  }
-
-  async saveSettings() {
-    await this.saveData(this.settings);
   }
 
   onunload() {
