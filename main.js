@@ -126,7 +126,7 @@ function findSourceMatches(lines, matcher) {
 }
 
 /** Occurrences in the currently-rendered DOM (for highlighting). */
-function findRenderedMatches(root, matcher, limit = Infinity) {
+function findRenderedMatches(root, matcher) {
   const matches = [];
   if (!root || !matcher || matcher.invalid) return matches;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -152,10 +152,61 @@ function findRenderedMatches(root, matcher, limit = Infinity) {
         index: mt.index,
         length: mt.length,
       });
-      if (matches.length >= limit) return matches;
     }
   }
   return matches;
+}
+
+function rangeCenterY(range) {
+  try {
+    if (!range) return null;
+    const rect = range.getBoundingClientRect();
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return null;
+    return (rect.top + rect.bottom) / 2;
+  } catch (e) {
+    debugWarn("rangeCenterY", e);
+    return null;
+  }
+}
+
+function viewportCenterY(scroller) {
+  try {
+    if (!scroller || typeof scroller.getBoundingClientRect !== "function") return null;
+    const rect = scroller.getBoundingClientRect();
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return null;
+    return (rect.top + rect.bottom) / 2;
+  } catch (e) {
+    debugWarn("viewportCenterY", e);
+    return null;
+  }
+}
+
+/**
+ * Keep the rendered yellow highlights centered around the current orange match.
+ * The search count/list still comes from the full note source; this only limits
+ * how many DOM ranges are sent to the CSS Highlight API at once.
+ */
+function limitDomHighlightsAroundCurrent(dom, currentRange, max, scroller) {
+  if (!Array.isArray(dom) || !dom.length) return [];
+  const n = Number(max);
+  if (!Number.isFinite(n) || n <= 0 || dom.length <= n) return dom;
+
+  const centerY = rangeCenterY(currentRange) ?? viewportCenterY(scroller);
+  if (centerY == null) return dom.slice(0, n);
+
+  return dom
+    .map((d, i) => {
+      const y = rangeCenterY(d.range);
+      return {
+        item: d,
+        index: i,
+        dist: y == null ? Infinity : Math.abs(y - centerY),
+      };
+    })
+    .sort((a, b) => a.dist - b.dist || a.index - b.index)
+    .slice(0, n)
+    .sort((a, b) => a.index - b.index)
+    .map((x) => x.item);
 }
 
 /* ----------------------------- table cell mapping ----------------------------- */
@@ -1042,14 +1093,10 @@ class FindBar {
 
     // Reading mode: list/count/nav come from the source (complete). The current
     // match is mapped to the rendered DOM by content (exact, even with duplicate
-    // cells). Falls back to the kept range, then nearest-to-top.
+    // cells). Yellow highlights are limited around the current match, not just
+    // the first N matches in the document.
     if (this.domMode) {
       const root = getRenderRoot(this.view);
-      const dom = findRenderedMatches(
-        root,
-        this.matcher,
-        this.plugin.settings.maxDomHighlights
-      );
       const m = this.matches[this.current];
       const scroller = getScroller(this.view);
       let cur = m
@@ -1062,6 +1109,9 @@ class FindBar {
         this.currentDomRange.startContainer.isConnected
       )
         cur = this.currentDomRange;
+
+      let dom = findRenderedMatches(root, this.matcher);
+
       if (!cur && dom.length) {
         const rect = scroller ? scroller.getBoundingClientRect() : { top: 0 };
         const targetY = rect.top + 80;
@@ -1077,19 +1127,21 @@ class FindBar {
         }
         cur = best ? best.range : null;
       }
+
       this.currentDomRange = cur;
+      dom = limitDomHighlightsAroundCurrent(
+        dom,
+        cur,
+        this.plugin.settings.maxDomHighlights,
+        scroller
+      );
       this.domApply(dom, cur);
       return;
     }
 
     const root = getRenderRoot(this.view);
-    const dom = findRenderedMatches(
-      root,
-      this.matcher,
-      this.plugin.settings.maxDomHighlights
-    );
-    CSS.highlights.set(HL_ALL, new Highlight(...dom.map((d) => d.range)));
-
+    const scroller = getScroller(this.view);
+    let dom = null;
     let currentRange = null;
     const m = this.matches[this.current];
     const lines = this.docLines || [];
@@ -1108,14 +1160,15 @@ class FindBar {
         if (isTable)
           currentRange = resolveTableByPoint(cm, off, lines, m, this.matcher);
         if (!currentRange) currentRange = resolveByDomAtPos(cm, off, this.matcher);
-        if (!currentRange && dom.length) {
+        if (!currentRange) {
+          dom = findRenderedMatches(root, this.matcher);
           let coords = null;
           try {
             if (typeof cm.coordsAtPos === "function") coords = cm.coordsAtPos(off);
           } catch (e) {
             debugWarn("coordsAtPos fallback", e);
           }
-          if (coords) {
+          if (coords && dom.length) {
             const cy = (coords.top + coords.bottom) / 2;
             const cx = coords.left;
             let best = null;
@@ -1134,13 +1187,15 @@ class FindBar {
         }
       }
     }
-    if (currentRange) {
-      const hl = new Highlight(currentRange);
-      hl.priority = 1;
-      CSS.highlights.set(HL_CURRENT, hl);
-    } else {
-      CSS.highlights.delete(HL_CURRENT);
-    }
+
+    if (!dom) dom = findRenderedMatches(root, this.matcher);
+    dom = limitDomHighlightsAroundCurrent(
+      dom,
+      currentRange,
+      this.plugin.settings.maxDomHighlights,
+      scroller
+    );
+    this.domApply(dom, currentRange);
   }
 
   search(query) {
@@ -1348,8 +1403,8 @@ class LiveFindSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Maximum DOM highlights")
-      .setDesc("Caps rendered highlights to avoid freezing very large notes. Search count/list still uses the full note source.")
+      .setName("Nearby DOM highlights")
+      .setDesc("Limits yellow highlights to the matches closest to the current result. Search count/list still uses the full note source.")
       .addText((text) =>
         text
           .setPlaceholder("2500")
