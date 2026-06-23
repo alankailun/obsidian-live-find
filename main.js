@@ -2,8 +2,8 @@
 
 const { Plugin, MarkdownView, Notice, setIcon, PluginSettingTab, Setting } = require("obsidian");
 
-const HL_ALL = "table-finder-all";
-const HL_CURRENT = "table-finder-current";
+const HL_ALL = "live-find-all";
+const HL_CURRENT = "live-find-current";
 
 const DEFAULT_SETTINGS = {
   debugMode: false,
@@ -860,24 +860,24 @@ class FindBar {
     }
     const host = this.view.containerEl;
 
-    const bar = host.createDiv({ cls: "tf-find-bar" });
+    const bar = host.createDiv({ cls: "lf-find-bar" });
     this.barEl = bar;
     this.input = bar.createEl("input", {
-      cls: "tf-input",
+      cls: "lf-input",
       type: "text",
       placeholder: "Find in note…",
     });
 
-    this.caseBtn = bar.createEl("button", { cls: "tf-btn tf-toggle", text: "Aa" });
+    this.caseBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "Aa" });
     this.caseBtn.title = "Match case";
-    this.regexBtn = bar.createEl("button", { cls: "tf-btn tf-toggle", text: ".*" });
+    this.regexBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: ".*" });
     this.regexBtn.title = "Use regular expression";
 
-    this.countEl = bar.createSpan({ cls: "tf-count", text: "" });
-    this.sepEl = bar.createDiv({ cls: "tf-sep" });
-    const prev = bar.createEl("button", { cls: "tf-btn" });
-    const next = bar.createEl("button", { cls: "tf-btn" });
-    const close = bar.createEl("button", { cls: "tf-btn" });
+    this.countEl = bar.createSpan({ cls: "lf-count", text: "" });
+    this.sepEl = bar.createDiv({ cls: "lf-sep" });
+    const prev = bar.createEl("button", { cls: "lf-btn" });
+    const next = bar.createEl("button", { cls: "lf-btn" });
+    const close = bar.createEl("button", { cls: "lf-btn" });
     setIcon(prev, "chevron-up");
     setIcon(next, "chevron-down");
     setIcon(close, "x");
@@ -901,7 +901,7 @@ class FindBar {
       this.input.focus();
     };
 
-    this.resultsEl = host.createDiv({ cls: "tf-results" });
+    this.resultsEl = host.createDiv({ cls: "lf-results" });
     this.resultsEl.style.display = "none";
     this.updateCount(); // collapse the empty count/separator on open
 
@@ -1253,16 +1253,16 @@ class FindBar {
     }
     el.style.display = "block";
     this.matches.forEach((m, i) => {
-      const row = el.createDiv({ cls: "tf-row" });
+      const row = el.createDiv({ cls: "lf-row" });
       if (i === this.current) row.addClass("is-active");
 
       // Second line: nearest heading above this match (always on).
       const head = nearestHeading(this.docLines, m.line);
       if (head) row.addClass("has-head");
 
-      const main = row.createDiv({ cls: "tf-main" });
-      main.createSpan({ cls: "tf-line", text: `Line ${m.line + 1}` });
-      const sn = main.createSpan({ cls: "tf-snippet" });
+      const main = row.createDiv({ cls: "lf-main" });
+      main.createSpan({ cls: "lf-line", text: `Line ${m.line + 1}` });
+      const sn = main.createSpan({ cls: "lf-snippet" });
 
       const snippet = buildSnippetData(
         m,
@@ -1282,7 +1282,7 @@ class FindBar {
 
       if (head) {
         const clean = head.text.replace(/[*_`]/g, "").trim();
-        row.createDiv({ cls: "tf-head" }).setText(clean);
+        row.createDiv({ cls: "lf-head" }).setText(clean);
       }
 
       row.onclick = () => {
@@ -1381,7 +1381,7 @@ module.exports = class LiveFindPlugin extends Plugin {
         background-color: #ff6d00;
         color: #ffffff;
       }
-      .tf-find-bar {
+      .lf-find-bar {
         position: absolute; top: 10px; right: 18px;
         z-index: var(--layer-popover, 30);
         display: flex; align-items: center; gap: 2px;
@@ -1390,42 +1390,42 @@ module.exports = class LiveFindPlugin extends Plugin {
         border-radius: 10px; padding: 5px 8px;
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
       }
-      .tf-find-bar .tf-input {
+      .lf-find-bar .lf-input {
         border: none !important; background: transparent !important;
         box-shadow: none !important; color: var(--text-normal);
         outline: none; width: 200px; font-size: 14px; padding: 2px 4px; margin: 0;
       }
-      .tf-find-bar .tf-count {
+      .lf-find-bar .lf-count {
         font-size: 12px; color: var(--text-muted);
         min-width: 46px; text-align: right; padding: 0 4px;
         font-variant-numeric: tabular-nums; white-space: nowrap;
       }
-      .tf-find-bar .tf-count.is-empty { color: var(--text-error); }
-      .tf-find-bar .tf-sep {
+      .lf-find-bar .lf-count.is-empty { color: var(--text-error); }
+      .lf-find-bar .lf-sep {
         width: 1px; height: 18px; margin: 0 4px;
         background: var(--background-modifier-border);
       }
-      .tf-find-bar .tf-btn {
+      .lf-find-bar .lf-btn {
         display: flex; align-items: center; justify-content: center;
         width: 26px; height: 26px; padding: 0;
         background: transparent !important; border: none !important;
         box-shadow: none !important; cursor: pointer;
         border-radius: 6px; color: var(--text-muted);
       }
-      .tf-find-bar .tf-btn:hover {
+      .lf-find-bar .lf-btn:hover {
         background: var(--background-modifier-hover) !important;
         color: var(--text-normal);
       }
-      .tf-find-bar .tf-btn svg { width: 16px; height: 16px; }
-      .tf-find-bar .tf-toggle {
+      .lf-find-bar .lf-btn svg { width: 16px; height: 16px; }
+      .lf-find-bar .lf-toggle {
         width: auto; min-width: 26px; padding: 0 6px;
         font-size: 11px; font-weight: 600;
       }
-      .tf-find-bar .tf-toggle.is-on {
+      .lf-find-bar .lf-toggle.is-on {
         background: var(--interactive-accent) !important;
         color: var(--text-on-accent) !important;
       }
-      .tf-results {
+      .lf-results {
         position: absolute; top: 50px; right: 18px;
         z-index: var(--layer-popover, 30);
         width: 340px; max-height: 320px; overflow-y: auto;
@@ -1434,28 +1434,28 @@ module.exports = class LiveFindPlugin extends Plugin {
         border-radius: 10px;
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); padding: 4px;
       }
-      .tf-results .tf-row {
+      .lf-results .lf-row {
         display: flex; flex-direction: column; gap: 2px;
         padding: 5px 8px; cursor: pointer; border-radius: 6px; font-size: 13px;
       }
-      .tf-results .tf-main {
+      .lf-results .lf-main {
         display: flex; align-items: baseline; gap: 6px;
         white-space: nowrap; overflow: hidden;
       }
-      .tf-results .tf-snippet { overflow: hidden; text-overflow: ellipsis; }
-      .tf-results .tf-snippet strong { color: var(--text-accent); }
-      .tf-results .tf-col {
+      .lf-results .lf-snippet { overflow: hidden; text-overflow: ellipsis; }
+      .lf-results .lf-snippet strong { color: var(--text-accent); }
+      .lf-results .lf-col {
         color: var(--text-muted); margin-right: 2px;
       }
-      .tf-results .tf-row:hover { background: var(--background-modifier-hover); }
-      .tf-results .tf-row.is-active {
+      .lf-results .lf-row:hover { background: var(--background-modifier-hover); }
+      .lf-results .lf-row.is-active {
         background: var(--background-modifier-active-hover, var(--background-modifier-hover));
       }
-      .tf-results .tf-line {
+      .lf-results .lf-line {
         color: var(--text-faint); flex: 0 0 auto;
         font-variant-numeric: tabular-nums;
       }
-      .tf-results .tf-head {
+      .lf-results .lf-head {
         color: var(--text-faint); font-size: 11px;
         padding-left: 38px; overflow: hidden;
         text-overflow: ellipsis; white-space: nowrap;
