@@ -7,10 +7,15 @@ const HL_CURRENT = "table-finder-current";
 
 function debounce(fn, ms) {
   let t;
-  return (...args) => {
+  const wrapped = (...args) => {
     clearTimeout(t);
     t = setTimeout(() => fn(...args), ms);
   };
+  wrapped.cancel = () => {
+    clearTimeout(t);
+    t = null;
+  };
+  return wrapped;
 }
 
 /* ----------------------------- matching engine ----------------------------- */
@@ -120,7 +125,8 @@ function findRenderedMatches(root, matcher) {
 /* ----------------------------- table cell mapping ----------------------------- */
 
 function isTableRow(line) {
-  return line.trim().startsWith("|");
+  const t = line.trim();
+  return t.startsWith("|") && t.includes("|", 1);
 }
 
 function isDelimiterRow(line) {
@@ -158,22 +164,32 @@ function locateInTables(lines, lineIdx) {
       i++;
       continue;
     }
-    tableIdx++;
+
     const blockStart = i;
     let j = i;
     while (j < lines.length && isTableRow(lines[j])) j++;
+
+    let delimOffset = -1;
+    for (let k = blockStart; k < j; k++) {
+      if (isDelimiterRow(lines[k])) {
+        delimOffset = k - blockStart;
+        break;
+      }
+    }
+
+    // A real Markdown table needs a delimiter row. Avoid treating code / ASCII
+    // art / arbitrary pipe-prefixed lines as tables.
+    if (delimOffset === -1) {
+      i = j;
+      continue;
+    }
+
+    tableIdx++;
     if (lineIdx >= blockStart && lineIdx < j) {
       const offset = lineIdx - blockStart;
-      let delimOffset = -1;
-      for (let k = blockStart; k < j; k++) {
-        if (isDelimiterRow(lines[k])) {
-          delimOffset = k - blockStart;
-          break;
-        }
-      }
       if (offset === 0) return { tableIdx, kind: "header" };
       if (offset === delimOffset) return { tableIdx, kind: "delim" };
-      const bodyRowIdx = offset - (delimOffset >= 0 ? delimOffset + 1 : 1);
+      const bodyRowIdx = offset - (delimOffset + 1);
       return { tableIdx, kind: "body", bodyRowIdx };
     }
     i = j;
@@ -248,21 +264,43 @@ function resolveByDomAtPos(cm, off, matcher) {
   }
 }
 
-function resolveTableByPoint(cm, off, lines, m, matcher) {
+function closestElementFromNode(node) {
+  if (!node) return null;
+  return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+}
+
+function tableFromDomAtPos(cm, off) {
+  try {
+    if (!cm || typeof cm.domAtPos !== "function") return null;
+    const d = cm.domAtPos(off);
+    const el = closestElementFromNode(d && d.node);
+    return el && el.closest ? el.closest("table") : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function tableFromPoint(cm, off) {
   try {
     if (!cm || typeof cm.coordsAtPos !== "function") return null;
     const coords = cm.coordsAtPos(off);
     if (!coords) return null;
     const y = (coords.top + coords.bottom) / 2;
-    let tableEl = null;
-    for (const x of [coords.left + 1, coords.left + 20, 120, window.innerWidth / 2]) {
+    const xs = [coords.left + 1, coords.left + 20, 120, window.innerWidth / 2];
+    for (const x of xs) {
       const el = document.elementFromPoint(x, y);
       const t = el && el.closest && el.closest("table");
-      if (t) {
-        tableEl = t;
-        break;
-      }
+      if (t) return t;
     }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function resolveTableByPoint(cm, off, lines, m, matcher) {
+  try {
+    const tableEl = tableFromDomAtPos(cm, off) || tableFromPoint(cm, off);
     if (!tableEl) return null;
 
     const info = cellInfoForMatch(lines[m.line], m.ch, matcher);
@@ -330,13 +368,7 @@ function extendPrefixWords(text, start, n) {
   return cursor;
 }
 
-/**
- * Source-level ranges occupied by Markdown image syntax on a line:
- *   ![[path.png]]   (Obsidian wikilink embed, optionally |size)
- *   ![alt](path)    (standard image)
- * Used in reading mode to drop matches that fall inside an image, since the
- * rendered preview shows an <img>, not the link text.
- */
+/** Source-level ranges occupied by Markdown image syntax on a line. */
 function imageSpansIn(line) {
   const spans = [];
   let re = /!\[\[[^\]\n]*\]\]/g;
@@ -347,6 +379,42 @@ function imageSpansIn(line) {
   while ((m = re.exec(line)) !== null)
     spans.push([m.index, m.index + m[0].length]);
   return spans;
+}
+
+/**
+ * Source-level ranges that are not visible in Reading mode. Examples:
+ *   [visible text](hidden-url)       -> URL and brackets are hidden
+ *   [[hidden-target|visible alias]]  -> target / pipe / brackets are hidden
+ *   ![[image.png]] and ![alt](img)   -> whole image syntax is hidden as text
+ */
+function hiddenSpansInReading(line) {
+  const spans = [...imageSpansIn(line)];
+  let m;
+
+  // Standard Markdown links. Keep only the label between [ and ] visible.
+  const mdLink = /(?<!!)\[([^\]\n]*)\]\(([^)\n]*)\)/g;
+  while ((m = mdLink.exec(line)) !== null) {
+    const textStart = m.index + 1;
+    const textEnd = textStart + m[1].length;
+    spans.push([m.index, textStart]);
+    spans.push([textEnd, m.index + m[0].length]);
+  }
+
+  // Obsidian wikilinks. [[Page]] shows Page; [[Page|Alias]] shows Alias.
+  const wiki = /(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g;
+  while ((m = wiki.exec(line)) !== null) {
+    if (m[2] != null) {
+      const aliasStart = m.index + m[0].indexOf("|") + 1;
+      const aliasEnd = m.index + m[0].length - 2;
+      spans.push([m.index, aliasStart]);
+      spans.push([aliasEnd, m.index + m[0].length]);
+    } else {
+      spans.push([m.index, m.index + 2]);
+      spans.push([m.index + m[0].length - 2, m.index + m[0].length]);
+    }
+  }
+
+  return spans.sort((a, b) => a[0] - b[0]);
 }
 
 function isInsideSpan(ch, spans) {
@@ -386,12 +454,219 @@ function cleanSnippet(line) {
   return line
     .replace(/!\[\[[^\]\n]*\]\]/g, "") // Obsidian image embeds
     .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "") // standard images
+    .replace(/(?<!!)\[([^\]\n]*)\]\([^)\n]*\)/g, "$1") // standard links
+    .replace(/(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g, (_, target, alias) => alias || target)
     .replace(/^[\s>#*+\-]+/, "")
     .replace(/[*_`]/g, "")
     .replace(/\|/g, " ")
     .replace(/[│├└─]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+
+/** Convert a small Markdown inline fragment to the text users actually read. */
+function visibleInlineText(text) {
+  return (text || "")
+    .replace(/!\[\[[^\]\n]*\]\]/g, "") // image embed: not readable text
+    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "") // standard image
+    .replace(/(?<!!)\[([^\]\n]*)\]\([^)\n]*\)/g, "$1") // [label](url) -> label
+    .replace(/(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g, (_, target, alias) => alias || target)
+    .replace(/<br\s*\/?\s*>/gi, " ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/[*_`~]/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tableDataCells(line) {
+  const raw = parseCells(line);
+  const out = [];
+  let dataCol = -1;
+  for (let i = 0; i < raw.length; i++) {
+    const cell = raw[i];
+    const isEdgeEmpty =
+      (i === 0 || i === raw.length - 1) && cell.text.trim() === "";
+    if (isEdgeEmpty) continue;
+    dataCol++;
+    out.push({ ...cell, dataCol });
+  }
+  return out;
+}
+
+function tableBlockForLine(lines, lineIdx) {
+  let i = 0;
+  while (i < lines.length) {
+    if (!isTableRow(lines[i])) {
+      i++;
+      continue;
+    }
+
+    const blockStart = i;
+    let j = i;
+    while (j < lines.length && isTableRow(lines[j])) j++;
+
+    let delimLine = -1;
+    for (let k = blockStart; k < j; k++) {
+      if (isDelimiterRow(lines[k])) {
+        delimLine = k;
+        break;
+      }
+    }
+
+    if (delimLine !== -1 && lineIdx >= blockStart && lineIdx < j) {
+      return { blockStart, blockEnd: j, headerLine: blockStart, delimLine };
+    }
+    i = j;
+  }
+  return null;
+}
+
+function isMostlyCJK(text) {
+  const compact = (text || "").replace(/\s+/g, "");
+  if (!compact) return false;
+  const cjk = (compact.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  return cjk >= 2 && cjk / compact.length >= 0.25;
+}
+
+function snippetWindow(source, hitIdx, hitLen, keepShort = false) {
+  if (keepShort && source.length <= 180) return { s: 0, e: source.length };
+
+  if (isMostlyCJK(source)) {
+    const s = Math.max(0, hitIdx - 14);
+    const e = Math.min(source.length, hitIdx + hitLen + 34);
+    return { s, e };
+  }
+
+  let s = wordStartBefore(source, hitIdx);
+  if (hitIdx - s === 0) s = extendPrefixWords(source, s, 2);
+  const e = Math.min(source.length, hitIdx + hitLen + 80);
+  return { s, e };
+}
+
+function appendHighlightedSnippet(container, source, hitIdx, hitLen, keepShort = false) {
+  if (!source) return;
+  if (hitIdx == null || hitIdx < 0 || hitLen <= 0) {
+    container.appendText(source.slice(0, 120));
+    if (source.length > 120) container.appendText("…");
+    return;
+  }
+
+  const { s, e } = snippetWindow(source, hitIdx, hitLen, keepShort);
+  const win = source.slice(s, e);
+  const ls = hitIdx - s;
+  const le = ls + hitLen;
+
+  if (s > 0) container.appendText("…");
+  if (ls > 0) container.appendText(win.slice(0, ls));
+  container.createEl("strong", { text: win.slice(ls, le) });
+  if (le < win.length) container.appendText(win.slice(le));
+  if (e < source.length) container.appendText("…");
+}
+
+function pushUniquePart(parts, text) {
+  const t = visibleInlineText(text).replace(/\s+/g, " ").trim();
+  if (!t) return;
+  const key = t.toLowerCase();
+  if (parts.some((p) => p.text.toLowerCase() === key)) return;
+  parts.push({ text: t, hit: null });
+}
+
+function buildTableSnippetData(m, lines, matcher) {
+  const loc = locateInTables(lines, m.line);
+  if (!loc || loc.kind !== "body") return null;
+
+  const block = tableBlockForLine(lines, m.line);
+  if (!block) return null;
+
+  const rowCells = tableDataCells(lines[m.line] || "");
+  const headerCells = tableDataCells(lines[block.headerLine] || "");
+  const info = cellInfoForMatch(lines[m.line] || "", m.ch, matcher);
+  if (!info || info.col < 0) return null;
+
+  const cell = rowCells[info.col];
+  if (!cell) return null;
+
+  const displayCell = visibleInlineText(cell.text);
+  if (!displayCell) return null;
+
+  // Estimate the occurrence index inside the visible cell. This is usually more
+  // stable than using the raw Markdown cell because links/emphasis may disappear.
+  const sourceOffsetInCell = Math.max(0, m.ch - cell.start);
+  const visibleBefore = visibleInlineText(cell.text.slice(0, sourceOffsetInCell));
+  const visibleK = findAll(visibleBefore, matcher).length;
+  const cellMatches = findAll(displayCell, matcher);
+  const pick = cellMatches[visibleK] || cellMatches[info.kInCell] || cellMatches[0];
+  if (!pick) return null;
+
+  const parts = [];
+  const rowLabel = rowCells[0] && info.col !== 0 ? rowCells[0].text : "";
+  const header = headerCells[info.col] ? headerCells[info.col].text : "";
+
+  // For table-heavy notes, this makes results much more meaningful:
+  //   row label · column header · matched cell text
+  pushUniquePart(parts, rowLabel);
+  pushUniquePart(parts, header);
+
+  const cellPart = { text: displayCell, hit: pick };
+  const cellKey = displayCell.toLowerCase();
+  const duplicateIdx = parts.findIndex((p) => p.text.toLowerCase() === cellKey);
+  if (duplicateIdx >= 0) {
+    parts[duplicateIdx] = cellPart;
+  } else {
+    parts.push(cellPart);
+  }
+
+  const sep = " · ";
+  let source = "";
+  let hitIdx = -1;
+  for (const part of parts) {
+    if (source) source += sep;
+    const start = source.length;
+    source += part.text;
+    if (part.hit && hitIdx < 0) hitIdx = start + part.hit.index;
+  }
+
+  if (hitIdx < 0) return null;
+  return { source, hitIdx, hitLen: pick.length, keepShort: true };
+}
+
+function buildLineSnippetData(m, matcher, domMode) {
+  const source = domMode ? cleanSnippet(m.lineText) : m.lineText;
+  if (!source) return null;
+
+  let hitIdx;
+  let hitLen;
+  if (domMode) {
+    // Count matches before this one within the same source line, skipping hidden
+    // Markdown spans, then select the same occurrence in the visible text.
+    const spans = hiddenSpansInReading(m.lineText);
+    let kInLine = 0;
+    for (const mt of findAll(m.lineText.slice(0, m.ch), matcher)) {
+      if (!isInsideSpan(mt.index, spans)) kInLine++;
+    }
+    const all = findAll(source, matcher);
+    const pick = all[kInLine] || all[0];
+    if (!pick) return { source, hitIdx: -1, hitLen: 0, keepShort: false };
+    hitIdx = pick.index;
+    hitLen = pick.length;
+  } else {
+    hitIdx = m.ch;
+    hitLen = m.len;
+  }
+
+  return { source, hitIdx, hitLen, keepShort: false };
+}
+
+function buildSnippetData(m, lines, matcher, domMode) {
+  return (
+    buildTableSnippetData(m, lines, matcher) ||
+    buildLineSnippetData(m, matcher, domMode)
+  );
 }
 
 /**
@@ -401,13 +676,13 @@ function cleanSnippet(line) {
  * (k = occurrences before the match within the same source line). Robust to
  * virtualization and duplicate cells (ordering is within one line).
  */
-function resolveReadingCurrentRange(root, lines, m, matcher) {
+function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
   try {
     if (!root) return null;
     const line = lines[m.line] || "";
-    // Images render as <img>, not text — so they're absent from textContent.
-    // Count only non-image preceding matches to align with what's in the DOM.
-    const spans = imageSpansIn(line);
+    // Count only matches that are visible in Reading mode, so the k-th match in
+    // the source line aligns with the k-th visible match in the DOM.
+    const spans = hiddenSpansInReading(line);
     let kInLine = 0;
     for (const mt of findAll(line.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;
@@ -417,14 +692,33 @@ function resolveReadingCurrentRange(root, lines, m, matcher) {
     const els = root.querySelectorAll(
       "tr, p, li, h1, h2, h3, h4, h5, h6, dd, dt, td, th, blockquote"
     );
+
+    const candidates = [];
     for (const el of els) {
       const got = (el.textContent || "").replace(/\s+/g, "").toLowerCase();
       if (got === want) {
-        const r = findKthOccurrenceRange(el, matcher, kInLine);
-        if (r) return r;
+        const range = findKthOccurrenceRange(el, matcher, kInLine);
+        if (range) candidates.push({ el, range });
       }
     }
-    return null;
+    if (!candidates.length) return null;
+
+    // If the same row/paragraph text appears multiple times, choose the rendered
+    // occurrence nearest the current scroll target instead of blindly taking the
+    // first duplicate in the DOM.
+    const rect = scroller ? scroller.getBoundingClientRect() : { top: 0 };
+    const targetY = rect.top + 80;
+    let best = candidates[0];
+    let bestDist = Infinity;
+    for (const c of candidates) {
+      const r = c.el.getBoundingClientRect();
+      const dist = Math.abs(r.top - targetY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = c;
+      }
+    }
+    return best.range;
   } catch (e) {
     return null;
   }
@@ -451,6 +745,24 @@ class FindBar {
 
   isOpen() {
     return !!this.barEl;
+  }
+
+  updateScroller() {
+    if (this.scroller && this.onScroll) {
+      this.scroller.removeEventListener("scroll", this.onScroll);
+    }
+
+    this.scroller = getScroller(this.view);
+
+    if (this.scroller && this.onScroll) {
+      this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
+    }
+  }
+
+  refreshCurrentSearch() {
+    if (!this.barEl) return;
+    if (this.query) this.search(this.query);
+    else this.clearHighlights();
   }
 
   open() {
@@ -508,7 +820,7 @@ class FindBar {
 
     this.onInput = debounce(() => this.search(this.input.value), 100);
     this.input.addEventListener("input", this.onInput);
-    this.input.addEventListener("keydown", (e) => {
+    this.onKeydown = (e) => {
       // Don't hijack keys while an IME is composing (e.g. Chinese pinyin Enter
       // commits the candidate — we'd otherwise step the search).
       if (e.isComposing || e.keyCode === 229) return;
@@ -525,12 +837,11 @@ class FindBar {
         e.preventDefault();
         this.close();
       }
-    });
+    };
+    this.input.addEventListener("keydown", this.onKeydown);
 
-    this.scroller = getScroller(this.view);
     this.onScroll = debounce(() => this.refreshHighlights(), 100);
-    if (this.scroller)
-      this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
+    this.updateScroller();
 
     // Re-run search when the user toggles Source / Live Preview / Reading
     // inside the same tab, so domMode, highlights and snippets stay accurate.
@@ -540,11 +851,21 @@ class FindBar {
       const mode = this.view.getMode();
       if (mode === this.lastViewMode) return;
       this.lastViewMode = mode;
-      this.scroller = getScroller(this.view);
-      if (this.query) this.search(this.query);
-      else this.clearHighlights();
+      this.updateScroller();
+      this.refreshCurrentSearch();
     });
-    this.plugin.registerEvent(this.layoutEvt);
+
+    // Keep results in sync if the note is edited while the find bar is open.
+    this.onEditorChange = debounce(() => {
+      if (!this.barEl) return;
+      const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+      if (active !== this.view) return;
+      this.refreshCurrentSearch();
+    }, 100);
+    this.editorChangeEvt = this.plugin.app.workspace.on(
+      "editor-change",
+      this.onEditorChange
+    );
 
     // Prefill from the current selection, like a browser / editor find.
     let initial = "";
@@ -557,21 +878,43 @@ class FindBar {
       this.search(initial);
     }
     setTimeout(() => {
+      if (!this.input) return;
       this.input.focus();
       this.input.select();
     }, 0);
   }
 
   close() {
-    if (this.scroller && this.onScroll)
+    if (this.onInput && this.onInput.cancel) this.onInput.cancel();
+    if (this.onScroll && this.onScroll.cancel) this.onScroll.cancel();
+    if (this.onEditorChange && this.onEditorChange.cancel)
+      this.onEditorChange.cancel();
+
+    if (this.input && this.onInput) {
+      this.input.removeEventListener("input", this.onInput);
+    }
+    if (this.input && this.onKeydown) {
+      this.input.removeEventListener("keydown", this.onKeydown);
+    }
+
+    if (this.scroller && this.onScroll) {
       this.scroller.removeEventListener("scroll", this.onScroll);
+    }
+    this.scroller = null;
+
     if (this.layoutEvt) this.plugin.app.workspace.offref(this.layoutEvt);
+    if (this.editorChangeEvt) this.plugin.app.workspace.offref(this.editorChangeEvt);
     this.layoutEvt = null;
+    this.editorChangeEvt = null;
+
     this.clearHighlights();
     if (this.barEl) this.barEl.remove();
     if (this.resultsEl) this.resultsEl.remove();
     this.barEl = null;
     this.resultsEl = null;
+    this.input = null;
+    this.onKeydown = null;
+    this.onEditorChange = null;
     this.matches = [];
     this.current = -1;
     this.query = ""; // ensure late timers can't repaint highlights
@@ -609,8 +952,9 @@ class FindBar {
       const root = getRenderRoot(this.view);
       const dom = findRenderedMatches(root, this.matcher);
       const m = this.matches[this.current];
+      const scroller = getScroller(this.view);
       let cur = m
-        ? resolveReadingCurrentRange(root, this.docLines, m, this.matcher)
+        ? resolveReadingCurrentRange(root, this.docLines, m, this.matcher, scroller)
         : null;
       if (
         !cur &&
@@ -620,7 +964,6 @@ class FindBar {
       )
         cur = this.currentDomRange;
       if (!cur && dom.length) {
-        const scroller = getScroller(this.view);
         const rect = scroller ? scroller.getBoundingClientRect() : { top: 0 };
         const targetY = rect.top + 80;
         let best = null;
@@ -649,7 +992,7 @@ class FindBar {
     const lines = this.docLines || [];
     if (m) {
       const line = lines[m.line] || "";
-      const isTable = isTableRow(line) && !isDelimiterRow(line);
+      const isTable = !!locateInTables(lines, m.line) && !isDelimiterRow(line);
       const cm = this.editor.cm;
       let off = null;
       try {
@@ -694,6 +1037,8 @@ class FindBar {
   }
 
   search(query) {
+    if (!this.barEl || !this.resultsEl) return;
+
     this.query = query;
     this.matcher = buildMatcher(query, this.caseSensitive, this.useRegex);
     this.domMode = this.view.getMode() === "preview";
@@ -701,14 +1046,19 @@ class FindBar {
     const text = this.editor.getValue();
     this.docLines = text.split("\n");
     this.matches = findSourceMatches(this.docLines, this.matcher);
-    // Reading mode: image links render as <img>, so their alt/path text isn't
-    // visible — drop matches that fall inside Markdown image syntax.
+    // Reading mode: drop source matches that are not visible in the rendered
+    // preview, such as image syntax, link URLs, wikilink targets and table
+    // delimiter rows. This avoids empty-looking results.
     if (this.domMode && this.matches.length) {
       const cache = new Map();
       this.matches = this.matches.filter((m) => {
+        const line = this.docLines[m.line] || "";
+        if (isDelimiterRow(line)) return false;
+        if (!cleanSnippet(line)) return false;
+
         let spans = cache.get(m.line);
         if (!spans) {
-          spans = imageSpansIn(this.docLines[m.line] || "");
+          spans = hiddenSpansInReading(line);
           cache.set(m.line, spans);
         }
         return !isInsideSpan(m.ch, spans);
@@ -756,6 +1106,7 @@ class FindBar {
   }
 
   updateCount() {
+    if (!this.countEl || !this.sepEl) return;
     if (!this.query) {
       this.countEl.setText("");
       this.countEl.removeClass("is-empty");
@@ -781,6 +1132,7 @@ class FindBar {
 
   renderList() {
     const el = this.resultsEl;
+    if (!el) return;
     el.empty();
     if (!this.query || !this.matches.length) {
       el.style.display = "none";
@@ -796,70 +1148,24 @@ class FindBar {
       if (head) row.addClass("has-head");
 
       const main = row.createDiv({ cls: "tf-main" });
-      main.createSpan({ cls: "tf-line", text: `行 ${m.line + 1}` });
+      main.createSpan({ cls: "tf-line", text: `Line ${m.line + 1}` });
       const sn = main.createSpan({ cls: "tf-snippet" });
 
-      // Both modes: snippet starts at the *word boundary before this exact hit*
-      // so a hit inside "Involuntary" reads "Involuntary…" not "voluntary…".
-      const source = this.domMode ? cleanSnippet(m.lineText) : m.lineText;
-      // In reading mode the source line is cleaned, so locate the same hit in
-      // the cleaned text by occurrence index within the line.
-      let hitIdx, hitLen;
-      if (this.domMode) {
-        // Count matches BEFORE this one within the same line, skipping any
-        // inside image syntax (cleanSnippet strips them out of `source`, so
-        // the cleaned-source indexing must agree).
-        const spans = imageSpansIn(m.lineText);
-        let kInLine = 0;
-        for (const mt of findAll(m.lineText.slice(0, m.ch), this.matcher)) {
-          if (!isInsideSpan(mt.index, spans)) kInLine++;
-        }
-        const all = findAll(source, this.matcher);
-        const pick = all[kInLine] || all[0];
-        if (!pick) {
-          sn.appendText(source.slice(0, 100));
-          row.onclick = () => {
-            this.current = i;
-            this.jumpToCurrent();
-            this.updateCount();
-            this.markActiveRow();
-          };
-          return;
-        }
-        hitIdx = pick.index;
-        hitLen = pick.length;
-      } else {
-        hitIdx = m.ch;
-        hitLen = m.len;
+      const snippet = buildSnippetData(
+        m,
+        this.docLines || [],
+        this.matcher,
+        this.domMode
+      );
+      if (snippet) {
+        appendHighlightedSnippet(
+          sn,
+          snippet.source,
+          snippet.hitIdx,
+          snippet.hitLen,
+          snippet.keepShort
+        );
       }
-
-      // A: for table-row hits, prepend the previous cell as a semantic anchor
-      // (e.g. column label) so duplicate cells in the list are distinguishable.
-      const prevCell = previousCellOf(m.lineText, m.ch);
-      if (prevCell) {
-        sn.createSpan({ cls: "tf-col", text: prevCell + "·" });
-      }
-
-      // Snippet starts at the word containing the hit. Only when the hit IS the
-      // whole word (inWord == 0, e.g. "Cavity" matching "Cavity") do we extend
-      // backward for more context like "Ventral Cavity". When the hit sits
-      // inside a longer word ("voluntary" inside "Involuntary"), the word
-      // itself is already enough context — extending would walk past it into a
-      // neighboring match.
-      let s = wordStartBefore(source, hitIdx);
-      if (hitIdx - s === 0) s = extendPrefixWords(source, s, 2);
-      const e = Math.min(source.length, hitIdx + hitLen + 80);
-      const win = source.slice(s, e);
-      if (s > 0) sn.appendText("…");
-      // Bold only the hit this entry represents — other matches that happen to
-      // fall in the same window are left as plain text so the user can tell
-      // which match a row stands for.
-      const ls = hitIdx - s;
-      const le = ls + hitLen;
-      if (ls > 0) sn.appendText(win.slice(0, ls));
-      sn.createEl("strong", { text: win.slice(ls, le) });
-      if (le < win.length) sn.appendText(win.slice(le));
-      if (e < source.length) sn.appendText("…");
 
       if (head) {
         const clean = head.text.replace(/[*_`]/g, "").trim();
