@@ -568,17 +568,63 @@ function appendHighlightedSnippet(container, source, hitIdx, hitLen, keepShort =
   if (e < source.length) container.appendText("…");
 }
 
-function pushUniquePart(parts, text) {
-  const t = visibleInlineText(text).replace(/\s+/g, " ").trim();
+function normalizeSnippetPart(text) {
+  return visibleInlineText(text).replace(/\s+/g, " ").trim();
+}
+
+function ellipsizeMiddle(text, maxLen = 42) {
+  const t = normalizeSnippetPart(text);
+  if (t.length <= maxLen) return t;
+  const head = Math.max(8, Math.floor((maxLen - 1) * 0.62));
+  const tail = Math.max(6, maxLen - 1 - head);
+  return t.slice(0, head).trimEnd() + "…" + t.slice(t.length - tail).trimStart();
+}
+
+function pushUniquePart(parts, text, opts = {}) {
+  const t = opts.noEllipsis
+    ? normalizeSnippetPart(text)
+    : ellipsizeMiddle(text, opts.maxLen || 42);
   if (!t) return;
   const key = t.toLowerCase();
   if (parts.some((p) => p.text.toLowerCase() === key)) return;
-  parts.push({ text: t, hit: null });
+  parts.push({ text: t, hit: null, role: opts.role || "context" });
+}
+
+function pushMatchedPart(parts, text, hit, opts = {}) {
+  const full = normalizeSnippetPart(text);
+  if (!full || !hit) return null;
+
+  // Keep the matched cell near the beginning of the visible snippet. If the cell
+  // is long, crop around the exact hit, but keep hit.index aligned to the cropped
+  // text so the result list highlights the same occurrence the user selected.
+  const maxLen = opts.maxLen || 96;
+  let display = full;
+  let adjustedHit = { ...hit };
+  if (full.length > maxLen) {
+    const before = isMostlyCJK(full) ? 18 : 28;
+    let s = Math.max(0, hit.index - before);
+    let e = Math.min(full.length, hit.index + hit.length + (maxLen - before));
+
+    // Prefer not to start in the middle of an English word.
+    if (!isMostlyCJK(full)) s = wordStartBefore(full, s);
+    display = (s > 0 ? "…" : "") + full.slice(s, e) + (e < full.length ? "…" : "");
+    adjustedHit = {
+      index: hit.index - s + (s > 0 ? 1 : 0),
+      length: hit.length,
+    };
+  }
+
+  const key = display.toLowerCase();
+  const duplicateIdx = parts.findIndex((p) => p.text.toLowerCase() === key);
+  const part = { text: display, hit: adjustedHit, role: opts.role || "match" };
+  if (duplicateIdx >= 0) parts[duplicateIdx] = part;
+  else parts.push(part);
+  return part;
 }
 
 function buildTableSnippetData(m, lines, matcher) {
   const loc = locateInTables(lines, m.line);
-  if (!loc || loc.kind !== "body") return null;
+  if (!loc || (loc.kind !== "body" && loc.kind !== "header")) return null;
 
   const block = tableBlockForLine(lines, m.line);
   if (!block) return null;
@@ -591,48 +637,48 @@ function buildTableSnippetData(m, lines, matcher) {
   const cell = rowCells[info.col];
   if (!cell) return null;
 
-  const displayCell = visibleInlineText(cell.text);
+  const displayCell = normalizeSnippetPart(cell.text);
   if (!displayCell) return null;
 
   // Estimate the occurrence index inside the visible cell. This is usually more
   // stable than using the raw Markdown cell because links/emphasis may disappear.
   const sourceOffsetInCell = Math.max(0, m.ch - cell.start);
-  const visibleBefore = visibleInlineText(cell.text.slice(0, sourceOffsetInCell));
+  const visibleBefore = normalizeSnippetPart(cell.text.slice(0, sourceOffsetInCell));
   const visibleK = findAll(visibleBefore, matcher).length;
   const cellMatches = findAll(displayCell, matcher);
   const pick = cellMatches[visibleK] || cellMatches[info.kInCell] || cellMatches[0];
   if (!pick) return null;
 
   const parts = [];
-  const rowLabel = rowCells[0] && info.col !== 0 ? rowCells[0].text : "";
   const header = headerCells[info.col] ? headerCells[info.col].text : "";
+  const rowLabel = rowCells[0] && info.col !== 0 ? rowCells[0].text : "";
 
-  // For table-heavy notes, this makes results much more meaningful:
-  //   row label · column header · matched cell text
-  pushUniquePart(parts, rowLabel);
-  pushUniquePart(parts, header);
-
-  const cellPart = { text: displayCell, hit: pick };
-  const cellKey = displayCell.toLowerCase();
-  const duplicateIdx = parts.findIndex((p) => p.text.toLowerCase() === cellKey);
-  if (duplicateIdx >= 0) {
-    parts[duplicateIdx] = cellPart;
-  } else {
-    parts.push(cellPart);
-  }
+  // Cell-level table snippets: put the column + matched cell first so the exact
+  // hit is always visible in the one-line result list. The row label is still
+  // included as trailing context, but shortened so it cannot hide the hit.
+  // Example: 控制 · 自主 (Voluntary) · ① 口腔期 (Voluntary / Buccal…)
+  pushUniquePart(parts, header, { maxLen: 24, role: "header" });
+  pushMatchedPart(parts, displayCell, pick, { maxLen: 88, role: "match" });
+  pushUniquePart(parts, rowLabel, { maxLen: 36, role: "row" });
 
   const sep = " · ";
   let source = "";
   let hitIdx = -1;
+  let hitLen = pick.length;
   for (const part of parts) {
     if (source) source += sep;
     const start = source.length;
     source += part.text;
-    if (part.hit && hitIdx < 0) hitIdx = start + part.hit.index;
+    if (part.hit && hitIdx < 0) {
+      hitIdx = start + part.hit.index;
+      hitLen = part.hit.length;
+    }
   }
 
   if (hitIdx < 0) return null;
-  return { source, hitIdx, hitLen: pick.length, keepShort: true };
+  // The hit is now near the beginning by construction, so keeping the short
+  // table snippet is safe and avoids jumping back to the long row label.
+  return { source, hitIdx, hitLen, keepShort: true };
 }
 
 function buildLineSnippetData(m, matcher, domMode) {
