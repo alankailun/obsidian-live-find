@@ -1,9 +1,41 @@
 "use strict";
 
-const { Plugin, MarkdownView, Notice, setIcon } = require("obsidian");
+const { Plugin, MarkdownView, Notice, setIcon, PluginSettingTab, Setting } = require("obsidian");
 
 const HL_ALL = "table-finder-all";
 const HL_CURRENT = "table-finder-current";
+
+const DEFAULT_SETTINGS = {
+  debugMode: false,
+  debounceMs: 100,
+  maxDomHighlights: 2500,
+};
+
+const SELECTORS = {
+  readingRoot: ".markdown-reading-view, .markdown-preview-view",
+  editorRoot: ".cm-content",
+  scroller: ".cm-scroller, .markdown-preview-view",
+};
+
+let DEBUG_ENABLED = false;
+
+function setDebugEnabled(enabled) {
+  DEBUG_ENABLED = !!enabled;
+}
+
+function debugWarn(where, err) {
+  if (!DEBUG_ENABLED) return;
+  console.warn(`[LiveFind] ${where}`, err);
+}
+
+function safeCall(where, fn, fallback = null) {
+  try {
+    return fn();
+  } catch (e) {
+    debugWarn(where, e);
+    return fallback;
+  }
+}
 
 function debounce(fn, ms) {
   let t;
@@ -27,7 +59,7 @@ function buildMatcher(query, caseSensitive, useRegex) {
     try {
       return { regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")) };
     } catch (e) {
-      return { invalid: true };
+      return { invalid: true, error: e && e.message ? e.message : "Invalid regular expression" };
     }
   }
   return { needle: caseSensitive ? query : query.toLowerCase(), caseSensitive };
@@ -64,17 +96,20 @@ function findAll(text, matcher) {
 /* ----------------------------- view helpers ----------------------------- */
 
 function getRenderRoot(view) {
+  if (!view || !view.containerEl || typeof view.getMode !== "function") return null;
   const mode = view.getMode();
-  if (mode === "preview") {
-    return view.containerEl.querySelector(
-      ".markdown-reading-view, .markdown-preview-view"
-    );
-  }
-  return view.containerEl.querySelector(".cm-content");
+  return view.containerEl.querySelector(
+    mode === "preview" ? SELECTORS.readingRoot : SELECTORS.editorRoot
+  );
 }
 
 function getScroller(view) {
-  return view.containerEl.querySelector(".cm-scroller, .markdown-preview-view");
+  if (!view || !view.containerEl) return null;
+  return view.containerEl.querySelector(SELECTORS.scroller);
+}
+
+function getEditorView(editor) {
+  return editor && editor.cm ? editor.cm : null;
 }
 
 /** Complete, viewport-independent search of the note SOURCE. */
@@ -91,7 +126,7 @@ function findSourceMatches(lines, matcher) {
 }
 
 /** Occurrences in the currently-rendered DOM (for highlighting). */
-function findRenderedMatches(root, matcher) {
+function findRenderedMatches(root, matcher, limit = Infinity) {
   const matches = [];
   if (!root || !matcher || matcher.invalid) return matches;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -117,6 +152,7 @@ function findRenderedMatches(root, matcher) {
         index: mt.index,
         length: mt.length,
       });
+      if (matches.length >= limit) return matches;
     }
   }
   return matches;
@@ -260,6 +296,7 @@ function resolveByDomAtPos(cm, off, matcher) {
     r.setEnd(node, best.index + best.length);
     return r;
   } catch (e) {
+    debugWarn("resolveByDomAtPos", e);
     return null;
   }
 }
@@ -276,6 +313,7 @@ function tableFromDomAtPos(cm, off) {
     const el = closestElementFromNode(d && d.node);
     return el && el.closest ? el.closest("table") : null;
   } catch (e) {
+    debugWarn("tableFromDomAtPos", e);
     return null;
   }
 }
@@ -294,6 +332,7 @@ function tableFromPoint(cm, off) {
     }
     return null;
   } catch (e) {
+    debugWarn("tableFromPoint", e);
     return null;
   }
 }
@@ -320,6 +359,7 @@ function resolveTableByPoint(cm, off, lines, m, matcher) {
     if (!cellEl) return null;
     return findKthOccurrenceRange(cellEl, matcher, info.kInCell);
   } catch (e) {
+    debugWarn("resolveTableByPoint", e);
     return null;
   }
 }
@@ -766,6 +806,7 @@ function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
     }
     return best.range;
   } catch (e) {
+    debugWarn("resolveReadingCurrentRange", e);
     return null;
   }
 }
@@ -864,7 +905,10 @@ class FindBar {
     this.resultsEl.style.display = "none";
     this.updateCount(); // collapse the empty count/separator on open
 
-    this.onInput = debounce(() => this.search(this.input.value), 100);
+    this.onInput = debounce(
+      () => this.search(this.input.value),
+      this.plugin.settings.debounceMs
+    );
     this.input.addEventListener("input", this.onInput);
     this.onKeydown = (e) => {
       // Don't hijack keys while an IME is composing (e.g. Chinese pinyin Enter
@@ -886,7 +930,10 @@ class FindBar {
     };
     this.input.addEventListener("keydown", this.onKeydown);
 
-    this.onScroll = debounce(() => this.refreshHighlights(), 100);
+    this.onScroll = debounce(
+      () => this.refreshHighlights(),
+      this.plugin.settings.debounceMs
+    );
     this.updateScroller();
 
     // Re-run search when the user toggles Source / Live Preview / Reading
@@ -907,7 +954,7 @@ class FindBar {
       const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
       if (active !== this.view) return;
       this.refreshCurrentSearch();
-    }, 100);
+    }, this.plugin.settings.debounceMs);
     this.editorChangeEvt = this.plugin.app.workspace.on(
       "editor-change",
       this.onEditorChange
@@ -918,7 +965,9 @@ class FindBar {
     try {
       const sel = this.editor.getSelection();
       if (sel && !sel.includes("\n")) initial = sel;
-    } catch (e) {}
+    } catch (e) {
+      debugWarn("read initial selection", e);
+    }
     if (initial) {
       this.input.value = initial;
       this.search(initial);
@@ -996,7 +1045,11 @@ class FindBar {
     // cells). Falls back to the kept range, then nearest-to-top.
     if (this.domMode) {
       const root = getRenderRoot(this.view);
-      const dom = findRenderedMatches(root, this.matcher);
+      const dom = findRenderedMatches(
+        root,
+        this.matcher,
+        this.plugin.settings.maxDomHighlights
+      );
       const m = this.matches[this.current];
       const scroller = getScroller(this.view);
       let cur = m
@@ -1030,7 +1083,11 @@ class FindBar {
     }
 
     const root = getRenderRoot(this.view);
-    const dom = findRenderedMatches(root, this.matcher);
+    const dom = findRenderedMatches(
+      root,
+      this.matcher,
+      this.plugin.settings.maxDomHighlights
+    );
     CSS.highlights.set(HL_ALL, new Highlight(...dom.map((d) => d.range)));
 
     let currentRange = null;
@@ -1039,11 +1096,13 @@ class FindBar {
     if (m) {
       const line = lines[m.line] || "";
       const isTable = !!locateInTables(lines, m.line) && !isDelimiterRow(line);
-      const cm = this.editor.cm;
+      const cm = getEditorView(this.editor);
       let off = null;
       try {
         off = this.editor.posToOffset({ line: m.line, ch: m.ch });
-      } catch (e) {}
+      } catch (e) {
+        debugWarn("posToOffset", e);
+      }
 
       if (off != null && cm) {
         if (isTable)
@@ -1053,7 +1112,9 @@ class FindBar {
           let coords = null;
           try {
             if (typeof cm.coordsAtPos === "function") coords = cm.coordsAtPos(off);
-          } catch (e) {}
+          } catch (e) {
+            debugWarn("coordsAtPos fallback", e);
+          }
           if (coords) {
             const cy = (coords.top + coords.bottom) / 2;
             const cx = coords.left;
@@ -1135,7 +1196,9 @@ class FindBar {
       try {
         const pm = this.view.previewMode || this.view.currentMode;
         if (pm && typeof pm.applyScroll === "function") pm.applyScroll(m.line);
-      } catch (e) {}
+      } catch (e) {
+        debugWarn("applyScroll", e);
+      }
       this.currentDomRange = null; // recompute fresh for the new selection
       this.refreshHighlights();
       setTimeout(() => this.refreshHighlights(), 90);
@@ -1146,7 +1209,9 @@ class FindBar {
     const to = { line: m.line, ch: m.ch + m.len };
     try {
       this.editor.scrollIntoView({ from, to }, true);
-    } catch (e) {}
+    } catch (e) {
+      debugWarn("scrollIntoView", e);
+    }
     this.refreshHighlights();
     setTimeout(() => this.refreshHighlights(), 60);
   }
@@ -1163,7 +1228,8 @@ class FindBar {
     this.countEl.style.display = "";
     this.sepEl.style.display = "";
     if (this.matcher && this.matcher.invalid) {
-      this.countEl.setText("regex?");
+      this.countEl.setText("Invalid regex");
+      this.countEl.title = this.matcher.error || "Invalid regular expression";
       this.countEl.addClass("is-empty");
       return;
     }
@@ -1172,6 +1238,7 @@ class FindBar {
       this.countEl.addClass("is-empty");
       return;
     }
+    this.countEl.title = "";
     this.countEl.removeClass("is-empty");
     this.countEl.setText(`${this.current + 1}/${this.matches.length}`);
   }
@@ -1240,8 +1307,70 @@ class FindBar {
 
 /* ----------------------------- plugin ----------------------------- */
 
+class LiveFindSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "Live Find settings" });
+
+    new Setting(containerEl)
+      .setName("Debug logging")
+      .setDesc("Log recoverable DOM / CodeMirror errors to the developer console.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.debugMode)
+          .onChange(async (value) => {
+            this.plugin.settings.debugMode = value;
+            setDebugEnabled(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Debounce delay")
+      .setDesc("Delay in milliseconds before re-running search while typing or scrolling.")
+      .addText((text) =>
+        text
+          .setPlaceholder("100")
+          .setValue(String(this.plugin.settings.debounceMs))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 50 && n <= 1000) {
+              this.plugin.settings.debounceMs = Math.round(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Maximum DOM highlights")
+      .setDesc("Caps rendered highlights to avoid freezing very large notes. Search count/list still uses the full note source.")
+      .addText((text) =>
+        text
+          .setPlaceholder("2500")
+          .setValue(String(this.plugin.settings.maxDomHighlights))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 100 && n <= 20000) {
+              this.plugin.settings.maxDomHighlights = Math.round(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+  }
+}
+
 module.exports = class LiveFindPlugin extends Plugin {
   async onload() {
+    await this.loadSettings();
+    setDebugEnabled(this.settings.debugMode);
+    this.addSettingTab(new LiveFindSettingTab(this.app, this));
+
     this.styleEl = document.createElement("style");
     this.styleEl.textContent = `
       ::highlight(${HL_ALL}) {
@@ -1356,6 +1485,14 @@ module.exports = class LiveFindPlugin extends Plugin {
         if (this.bar) this.bar.close();
       })
     );
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
   }
 
   onunload() {
