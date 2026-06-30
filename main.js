@@ -38,16 +38,27 @@ function debounce(fn, ms) {
 /* ----------------------------- matching engine ----------------------------- */
 
 /** Build a matcher from query + flags. Returns null if no query. */
-function buildMatcher(query, caseSensitive, useRegex) {
+function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
   if (!query) return null;
   if (useRegex) {
     try {
-      return { regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")) };
+      return { regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")), wholeWord };
     } catch (e) {
       return { invalid: true, error: e && e.message ? e.message : "Invalid regular expression" };
     }
   }
-  return { needle: caseSensitive ? query : query.toLowerCase(), caseSensitive };
+  return { needle: caseSensitive ? query : query.toLowerCase(), caseSensitive, wholeWord };
+}
+
+function isSearchWordChar(ch) {
+  return !!ch && /[A-Za-z0-9_]/.test(ch);
+}
+
+function isWholeWordMatch(text, index, length) {
+  return (
+    !isSearchWordChar(text.charAt(index - 1)) &&
+    !isSearchWordChar(text.charAt(index + length))
+  );
 }
 
 /** Find every match of matcher in text. Returns [{ index, length }]. */
@@ -62,7 +73,8 @@ function findAll(text, matcher) {
         matcher.regex.lastIndex++;
         continue;
       }
-      out.push({ index: m.index, length: m[0].length });
+      if (!matcher.wholeWord || isWholeWordMatch(text, m.index, m[0].length))
+        out.push({ index: m.index, length: m[0].length });
     }
   } else {
     const hay = matcher.caseSensitive ? text : text.toLowerCase();
@@ -71,7 +83,8 @@ function findAll(text, matcher) {
     while (true) {
       const i = hay.indexOf(n, from);
       if (i === -1) break;
-      out.push({ index: i, length: n.length });
+      if (!matcher.wholeWord || isWholeWordMatch(text, i, n.length))
+        out.push({ index: i, length: n.length });
       from = i + n.length;
     }
   }
@@ -860,6 +873,7 @@ class FindBar {
     this.matcher = null;
     this.caseSensitive = false;
     this.useRegex = false;
+    this.wholeWord = false;
     this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
     this.currentDomRange = null; // anchored current range in reading mode
     this.barEl = null;
@@ -908,6 +922,8 @@ class FindBar {
     this.caseBtn.title = "Match case";
     this.regexBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: ".*" });
     this.regexBtn.title = "Use regular expression";
+    this.wordBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "W" });
+    this.wordBtn.title = "Match whole word";
 
     this.countEl = bar.createSpan({ cls: "lf-count", text: "" });
     this.sepEl = bar.createDiv({ cls: "lf-sep" });
@@ -933,6 +949,12 @@ class FindBar {
     this.regexBtn.onclick = () => {
       this.useRegex = !this.useRegex;
       this.regexBtn.toggleClass("is-on", this.useRegex);
+      this.search(this.input.value);
+      this.input.focus();
+    };
+    this.wordBtn.onclick = () => {
+      this.wholeWord = !this.wholeWord;
+      this.wordBtn.toggleClass("is-on", this.wholeWord);
       this.search(this.input.value);
       this.input.focus();
     };
@@ -1187,7 +1209,7 @@ class FindBar {
     if (!this.barEl || !this.resultsEl) return;
 
     this.query = query;
-    this.matcher = buildMatcher(query, this.caseSensitive, this.useRegex);
+    this.matcher = buildMatcher(query, this.caseSensitive, this.useRegex, this.wholeWord);
     this.domMode = this.view.getMode() === "preview";
     // Both modes: complete whole-note search from the source.
     const text = this.editor.getValue();
@@ -1363,6 +1385,7 @@ module.exports = class LiveFindPlugin extends Plugin {
         position: absolute; top: 10px; right: 18px;
         z-index: var(--layer-popover, 30);
         display: flex; align-items: center; gap: 2px;
+        max-width: calc(100% - 36px);
         background: var(--background-primary);
         border: 1px solid var(--background-modifier-border);
         border-radius: 10px; padding: 5px 8px;
@@ -1371,7 +1394,8 @@ module.exports = class LiveFindPlugin extends Plugin {
       .lf-find-bar .lf-input {
         border: none !important; background: transparent !important;
         box-shadow: none !important; color: var(--text-normal);
-        outline: none; width: 200px; font-size: 14px; padding: 2px 4px; margin: 0;
+        outline: none; width: 200px; min-width: 72px; flex: 1 1 160px;
+        font-size: 14px; padding: 2px 4px; margin: 0;
       }
       .lf-find-bar .lf-count {
         font-size: 12px; color: var(--text-muted);
@@ -1386,6 +1410,7 @@ module.exports = class LiveFindPlugin extends Plugin {
       .lf-find-bar .lf-btn {
         display: flex; align-items: center; justify-content: center;
         width: 26px; height: 26px; padding: 0;
+        flex: 0 0 26px;
         background: transparent !important; border: none !important;
         box-shadow: none !important; cursor: pointer;
         border-radius: 6px; color: var(--text-muted);
