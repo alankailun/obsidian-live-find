@@ -17,6 +17,30 @@ const SELECTORS = {
   scroller: ".cm-scroller, .markdown-preview-view",
 };
 
+const DEFAULT_FIND_OPTIONS = {
+  caseSensitive: false,
+  useRegex: false,
+  wholeWord: false,
+};
+
+function normalizeFindOptions(options) {
+  const src = options && typeof options === "object" ? options : {};
+  return {
+    caseSensitive:
+      typeof src.caseSensitive === "boolean"
+        ? src.caseSensitive
+        : DEFAULT_FIND_OPTIONS.caseSensitive,
+    useRegex:
+      typeof src.useRegex === "boolean"
+        ? src.useRegex
+        : DEFAULT_FIND_OPTIONS.useRegex,
+    wholeWord:
+      typeof src.wholeWord === "boolean"
+        ? src.wholeWord
+        : DEFAULT_FIND_OPTIONS.wholeWord,
+  };
+}
+
 function debugWarn(where, err) {
   if (!DEBUG) return;
   console.warn(`[LiveFind] ${where}`, err);
@@ -37,27 +61,72 @@ function debounce(fn, ms) {
 
 /* ----------------------------- matching engine ----------------------------- */
 
+const TOKEN_CHAR_RE = (() => {
+  try {
+    return new RegExp("[\\p{L}\\p{M}\\p{N}_]", "u");
+  } catch (e) {
+    return /[A-Za-z0-9_]/;
+  }
+})();
+
+const BOUNDARYLESS_SCRIPT_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/;
+
 /** Build a matcher from query + flags. Returns null if no query. */
 function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
   if (!query) return null;
+  const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(query);
   if (useRegex) {
     try {
-      return { regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")), wholeWord };
+      return {
+        regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")),
+        wholeWord: !!wholeWord,
+        useWordBoundaries,
+      };
     } catch (e) {
       return { invalid: true, error: e && e.message ? e.message : "Invalid regular expression" };
     }
   }
-  return { needle: caseSensitive ? query : query.toLowerCase(), caseSensitive, wholeWord };
+  return {
+    needle: caseSensitive ? query : query.toLowerCase(),
+    caseSensitive,
+    wholeWord: !!wholeWord,
+    useWordBoundaries,
+  };
 }
 
-function isSearchWordChar(ch) {
-  return !!ch && /[A-Za-z0-9_]/.test(ch);
+function isBoundarylessScriptChar(ch) {
+  return !!ch && BOUNDARYLESS_SCRIPT_RE.test(ch);
 }
 
-function isWholeWordMatch(text, index, length) {
+function isSearchTokenChar(ch) {
+  return !!ch && TOKEN_CHAR_RE.test(ch) && !isBoundarylessScriptChar(ch);
+}
+
+function edgeCharBefore(text, index) {
+  if (index <= 0) return "";
+  const chars = [...text.slice(Math.max(0, index - 2), index)];
+  return chars[chars.length - 1] || "";
+}
+
+function edgeCharAfter(text, index) {
+  if (index >= text.length) return "";
+  return [...text.slice(index, index + 2)][0] || "";
+}
+
+function queryUsesWordBoundaries(query) {
+  let hasTokenChar = false;
+  for (const ch of query) {
+    if (isBoundarylessScriptChar(ch)) return false;
+    if (isSearchTokenChar(ch)) hasTokenChar = true;
+  }
+  return hasTokenChar;
+}
+
+function isWholeWordMatch(text, index, length, matcher) {
+  if (!matcher.useWordBoundaries) return true;
   return (
-    !isSearchWordChar(text.charAt(index - 1)) &&
-    !isSearchWordChar(text.charAt(index + length))
+    !isSearchTokenChar(edgeCharBefore(text, index)) &&
+    !isSearchTokenChar(edgeCharAfter(text, index + length))
   );
 }
 
@@ -73,7 +142,7 @@ function findAll(text, matcher) {
         matcher.regex.lastIndex++;
         continue;
       }
-      if (!matcher.wholeWord || isWholeWordMatch(text, m.index, m[0].length))
+      if (!matcher.wholeWord || isWholeWordMatch(text, m.index, m[0].length, matcher))
         out.push({ index: m.index, length: m[0].length });
     }
   } else {
@@ -83,7 +152,7 @@ function findAll(text, matcher) {
     while (true) {
       const i = hay.indexOf(n, from);
       if (i === -1) break;
-      if (!matcher.wholeWord || isWholeWordMatch(text, i, n.length))
+      if (!matcher.wholeWord || isWholeWordMatch(text, i, n.length, matcher))
         out.push({ index: i, length: n.length });
       from = i + n.length;
     }
@@ -871,9 +940,13 @@ class FindBar {
     this.current = -1;
     this.query = "";
     this.matcher = null;
-    this.caseSensitive = false;
-    this.useRegex = false;
-    this.wholeWord = false;
+    const options =
+      plugin && typeof plugin.getFindOptions === "function"
+        ? plugin.getFindOptions()
+        : DEFAULT_FIND_OPTIONS;
+    this.caseSensitive = options.caseSensitive;
+    this.useRegex = options.useRegex;
+    this.wholeWord = options.wholeWord;
     this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
     this.currentDomRange = null; // anchored current range in reading mode
     this.barEl = null;
@@ -902,6 +975,30 @@ class FindBar {
     else this.clearHighlights();
   }
 
+  syncToggleButtons() {
+    if (this.caseBtn) this.caseBtn.toggleClass("is-on", this.caseSensitive);
+    if (this.regexBtn) this.regexBtn.toggleClass("is-on", this.useRegex);
+    if (this.wordBtn) this.wordBtn.toggleClass("is-on", this.wholeWord);
+  }
+
+  persistFindOptions() {
+    if (this.plugin && typeof this.plugin.saveFindOptions === "function") {
+      this.plugin.saveFindOptions({
+        caseSensitive: this.caseSensitive,
+        useRegex: this.useRegex,
+        wholeWord: this.wholeWord,
+      });
+    }
+  }
+
+  setSearchOption(name, value) {
+    this[name] = value;
+    this.syncToggleButtons();
+    this.persistFindOptions();
+    this.search(this.input.value);
+    this.input.focus();
+  }
+
   open() {
     if (this.barEl) {
       this.input.focus();
@@ -924,6 +1021,7 @@ class FindBar {
     this.regexBtn.title = "Use regular expression";
     this.wordBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "W" });
     this.wordBtn.title = "Match whole word";
+    this.syncToggleButtons();
 
     this.countEl = bar.createSpan({ cls: "lf-count", text: "" });
     this.sepEl = bar.createDiv({ cls: "lf-sep" });
@@ -941,22 +1039,13 @@ class FindBar {
     next.onclick = () => this.step(1);
     close.onclick = () => this.close();
     this.caseBtn.onclick = () => {
-      this.caseSensitive = !this.caseSensitive;
-      this.caseBtn.toggleClass("is-on", this.caseSensitive);
-      this.search(this.input.value);
-      this.input.focus();
+      this.setSearchOption("caseSensitive", !this.caseSensitive);
     };
     this.regexBtn.onclick = () => {
-      this.useRegex = !this.useRegex;
-      this.regexBtn.toggleClass("is-on", this.useRegex);
-      this.search(this.input.value);
-      this.input.focus();
+      this.setSearchOption("useRegex", !this.useRegex);
     };
     this.wordBtn.onclick = () => {
-      this.wholeWord = !this.wholeWord;
-      this.wordBtn.toggleClass("is-on", this.wholeWord);
-      this.search(this.input.value);
-      this.input.focus();
+      this.setSearchOption("wholeWord", !this.wholeWord);
     };
 
     this.resultsEl = host.createDiv({ cls: "lf-results" });
@@ -1371,6 +1460,8 @@ class FindBar {
 
 module.exports = class LiveFindPlugin extends Plugin {
   async onload() {
+    await this.loadPluginData();
+
     this.styleEl = document.createElement("style");
     this.styleEl.textContent = `
       ::highlight(${HL_ALL}) {
@@ -1488,6 +1579,27 @@ module.exports = class LiveFindPlugin extends Plugin {
         if (this.bar) this.bar.close();
       })
     );
+  }
+
+  async loadPluginData() {
+    try {
+      this.data = (await this.loadData()) || {};
+    } catch (e) {
+      debugWarn("loadData", e);
+      this.data = {};
+    }
+    this.findOptions = normalizeFindOptions(this.data.findOptions);
+  }
+
+  getFindOptions() {
+    return normalizeFindOptions(this.findOptions);
+  }
+
+  saveFindOptions(options) {
+    this.findOptions = normalizeFindOptions(options);
+    const data = this.data && typeof this.data === "object" ? this.data : {};
+    this.data = { ...data, findOptions: this.findOptions };
+    this.saveData(this.data).catch((e) => debugWarn("save find options", e));
   }
 
   onunload() {

@@ -19,7 +19,8 @@ rendered text (tables included).
   source so the active match never lands on the wrong word.
 - **Result list** with line numbers and the matched term **bolded** in context;
   click any row to jump.
-- **Match case** (`Aa`) and **regular expression** (`.*`) toggles.
+- **Match case** (`Aa`), **regular expression** (`.*`), and smarter
+  **whole word** (`W`) toggles. Toggle choices are remembered.
 - **Prefill from selection** — select a word, trigger the command, and it's
   searched instantly.
 - **Keyboard navigation** — `Enter` / `↓` next, `Shift+Enter` / `↑` previous,
