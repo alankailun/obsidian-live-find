@@ -1673,133 +1673,12 @@ module.exports = class LiveFindPlugin extends Plugin {
   async onload() {
     await this.loadPluginData();
 
-    this.styleEl = document.createElement("style");
-    this.styleEl.textContent = `
-      ::highlight(${HL_ALL}) {
-        background-color: rgba(255, 213, 0, 0.45);
-        color: inherit;
-      }
-      ::highlight(${HL_CURRENT}) {
-        background-color: #ff6d00;
-        color: #ffffff;
-      }
-      .lf-find-bar {
-        position: absolute; top: 10px; right: 18px;
-        z-index: var(--layer-popover, 30);
-        display: flex; align-items: center; gap: 2px;
-        max-width: calc(100% - 36px);
-        background: var(--background-primary);
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 10px; padding: 5px 8px;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
-      }
-      .lf-find-bar .lf-input {
-        border: none !important; background: transparent !important;
-        box-shadow: none !important; color: var(--text-normal);
-        outline: none; width: 200px; min-width: 72px; flex: 1 1 160px;
-        font-size: 14px; padding: 2px 4px; margin: 0;
-      }
-      .lf-find-bar .lf-count {
-        font-size: 12px; color: var(--text-muted);
-        min-width: 46px; text-align: right; padding: 0 4px;
-        font-variant-numeric: tabular-nums; white-space: nowrap;
-      }
-      .lf-find-bar .lf-count.is-empty { color: var(--text-error); }
-      .lf-find-bar .lf-sep {
-        width: 1px; height: 18px; margin: 0 4px;
-        background: var(--background-modifier-border);
-      }
-      .lf-find-bar .lf-btn {
-        display: flex; align-items: center; justify-content: center;
-        width: 26px; height: 26px; padding: 0;
-        flex: 0 0 26px;
-        background: transparent !important; border: none !important;
-        box-shadow: none !important; cursor: pointer;
-        border-radius: 6px; color: var(--text-muted);
-      }
-      .lf-find-bar .lf-btn:hover {
-        background: var(--background-modifier-hover) !important;
-        color: var(--text-normal);
-      }
-      .lf-find-bar .lf-btn svg { width: 16px; height: 16px; }
-      .lf-find-bar .lf-toggle {
-        width: auto; min-width: 26px; padding: 0 6px;
-        font-size: 11px; font-weight: 600;
-      }
-      .lf-find-bar .lf-toggle.lf-heading-toggle {
-        min-width: 30px;
-      }
-      .lf-find-bar .lf-toggle.is-on {
-        background: var(--interactive-accent) !important;
-        color: var(--text-on-accent) !important;
-      }
-      .lf-results {
-        position: absolute; top: 50px; right: 18px;
-        z-index: var(--layer-popover, 30);
-        width: 340px; max-height: 320px; overflow-y: auto;
-        background: var(--background-primary);
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 10px;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); padding: 4px;
-      }
-      .lf-results .lf-row {
-        display: flex; flex-direction: column; gap: 2px;
-        padding: 5px 8px; cursor: pointer; border-radius: 6px; font-size: 13px;
-        scroll-margin-top: 28px;
-      }
-      .lf-results .lf-group {
-        position: sticky; top: -4px; z-index: 1;
-        display: flex; align-items: center; justify-content: space-between; gap: 8px;
-        padding: 8px 8px 3px;
-        color: var(--text-muted); font-size: 11px; font-weight: 600;
-        background: var(--background-primary);
-        border-top: 1px solid var(--background-modifier-border);
-        box-shadow: 0 1px 0 var(--background-modifier-border);
-      }
-      .lf-results .lf-group:first-child {
-        border-top: none; padding-top: 3px;
-      }
-      .lf-results .lf-group-title {
-        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      }
-      .lf-results .lf-group-count {
-        flex: 0 0 auto; color: var(--text-faint);
-        font-variant-numeric: tabular-nums;
-      }
-      .lf-results .lf-group.is-active .lf-group-count {
-        color: var(--text-accent);
-      }
-      .lf-results .lf-main {
-        display: flex; align-items: baseline; gap: 6px;
-        white-space: nowrap; overflow: hidden;
-      }
-      .lf-results .lf-snippet { overflow: hidden; text-overflow: ellipsis; }
-      .lf-results .lf-snippet strong { color: var(--text-accent); }
-      .lf-results .lf-col {
-        color: var(--text-muted); margin-right: 2px;
-      }
-      .lf-results .lf-row:hover { background: var(--background-modifier-hover); }
-      .lf-results .lf-row.is-active {
-        background: var(--background-modifier-active-hover, var(--background-modifier-hover));
-      }
-      .lf-results .lf-line {
-        color: var(--text-faint); flex: 0 0 auto;
-        font-variant-numeric: tabular-nums;
-      }
-      .lf-results .lf-head {
-        color: var(--text-faint); font-size: 11px;
-        padding-left: 38px; overflow: hidden;
-        text-overflow: ellipsis; white-space: nowrap;
-      }
-    `;
-    document.head.appendChild(this.styleEl);
 
     this.bar = null;
 
     this.addCommand({
       id: "find-in-note-rendered",
       name: "Find in note (top bar)",
-      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "F" }],
       callback: () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) return new Notice("Open a Markdown note first.");
@@ -1845,6 +1724,5 @@ module.exports = class LiveFindPlugin extends Plugin {
       CSS.highlights.delete(HL_ALL);
       CSS.highlights.delete(HL_CURRENT);
     }
-    if (this.styleEl) this.styleEl.remove();
   }
 };

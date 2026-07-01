@@ -30,19 +30,19 @@ rendered text (tables included).
 
 ## Usage
 
-Run the command **"Find in note (top bar)"** (default hotkey `Cmd/Ctrl+Shift+F`).
-The bar appears at the top-right of the note.
+Run the command **"Find in note (top bar)"**. The bar appears at the top-right
+of the note.
 
-To use it as a true browser-style `Cmd/Ctrl+F`, rebind the command in
-**Settings → Hotkeys** (you may need to unbind Obsidian's built-in
+To use it as a true browser-style `Cmd/Ctrl+F`, bind the command in
+**Settings -> Hotkeys** (you may need to unbind Obsidian's built-in
 "Search current file" first).
 
 ## Install (manual)
 
-1. Download `main.js` and `manifest.json` from a release.
+1. Download `main.js`, `manifest.json`, and `styles.css` from a release.
 2. Copy them into `<your vault>/.obsidian/plugins/live-find/`.
 3. Reload Obsidian and enable **Live Find** in
-   **Settings → Community plugins**.
+   **Settings -> Community plugins**.
 
 ## Limitations
 

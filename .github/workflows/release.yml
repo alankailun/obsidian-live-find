@@ -27,7 +27,17 @@ jobs:
           - Heading-grouped result lists with sticky group headers.
           - Scoped match counts in active heading groups.
           EOF
-          gh release create "$TAG" main.js manifest.json versions.json \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
-            --notes-file release-notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file release-notes.md
+            gh release upload "$TAG" main.js manifest.json styles.css versions.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$TAG" main.js manifest.json styles.css versions.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file release-notes.md
+          fi
