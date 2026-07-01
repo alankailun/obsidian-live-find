@@ -1677,7 +1677,7 @@ module.exports = class LiveFindPlugin extends Plugin {
     this.bar = null;
 
     this.addCommand({
-      id: "find-in-note-rendered",
+      id: "open-find-bar",
       name: "Open find bar",
       callback: () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
