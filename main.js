@@ -22,26 +22,27 @@ const DEFAULT_FIND_OPTIONS = {
   useRegex: false,
   wholeWord: false,
   groupResults: false,
-  headingGroupLevel: "top",
+  headingGroupLevel: 2,
+  showResultHeadings: true,
 };
 
 function normalizeHeadingGroupLevel(value) {
-  if (value === "top") return value;
   const n = Number(value);
   if (Number.isInteger(n) && n >= 1 && n <= 6) return n;
   return DEFAULT_FIND_OPTIONS.headingGroupLevel;
 }
 
 function headingLevelLabel(level) {
-  return level === "top" ? "HT" : `H${normalizeHeadingGroupLevel(level)}`;
+  return `H${normalizeHeadingGroupLevel(level)}`;
 }
 
 function headingLevelMenuLabel(level) {
-  return level === "top" ? "Top heading" : `Heading ${normalizeHeadingGroupLevel(level)}`;
+  return `Heading ${normalizeHeadingGroupLevel(level)}`;
 }
 
 function normalizeFindOptions(options) {
   const src = options && typeof options === "object" ? options : {};
+  const savedRemovedTopLevel = src.headingGroupLevel === "top";
   return {
     caseSensitive:
       typeof src.caseSensitive === "boolean"
@@ -57,9 +58,13 @@ function normalizeFindOptions(options) {
         : DEFAULT_FIND_OPTIONS.wholeWord,
     groupResults:
       typeof src.groupResults === "boolean"
-        ? src.groupResults
+        ? src.groupResults && !savedRemovedTopLevel
         : DEFAULT_FIND_OPTIONS.groupResults,
     headingGroupLevel: normalizeHeadingGroupLevel(src.headingGroupLevel),
+    showResultHeadings:
+      typeof src.showResultHeadings === "boolean"
+        ? src.showResultHeadings
+        : DEFAULT_FIND_OPTIONS.showResultHeadings,
   };
 }
 
@@ -634,19 +639,6 @@ function nearestHeading(lines, lineIdx, maxLevel = 6) {
   return null;
 }
 
-function topHeadingLevel(lines) {
-  let best = Infinity;
-  for (let i = 0; i < lines.length; i++) {
-    const heading = parseHeading(lines[i], i);
-    if (heading && heading.level < best) best = heading.level;
-  }
-  return Number.isFinite(best) ? best : 1;
-}
-
-function resolveHeadingGroupLevel(lines, level) {
-  return level === "top" ? topHeadingLevel(lines || []) : normalizeHeadingGroupLevel(level);
-}
-
 function cleanHeadingText(text) {
   return (text || "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
 }
@@ -1003,6 +995,7 @@ class FindBar {
     this.wholeWord = options.wholeWord;
     this.groupResults = options.groupResults;
     this.headingGroupLevel = options.headingGroupLevel;
+    this.showResultHeadings = options.showResultHeadings;
     this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
     this.currentDomRange = null; // anchored current range in reading mode
     this.barEl = null;
@@ -1054,6 +1047,7 @@ class FindBar {
         wholeWord: this.wholeWord,
         groupResults: this.groupResults,
         headingGroupLevel: this.headingGroupLevel,
+        showResultHeadings: this.showResultHeadings,
       });
     }
   }
@@ -1076,21 +1070,37 @@ class FindBar {
     if (this.input) this.input.focus();
   }
 
+  setResultHeadingDisplay(showResultHeadings) {
+    this.showResultHeadings = !!showResultHeadings;
+    this.syncToggleButtons();
+    this.persistFindOptions();
+    this.renderList();
+    this.markActiveRow();
+    if (this.input) this.input.focus();
+  }
+
   showHeadingGroupMenu(evt) {
     evt.preventDefault();
     const menu = new Menu();
     menu.addItem((item) => {
       item
-        .setTitle("Off")
+        .setTitle("Show row headings")
+        .setChecked(this.showResultHeadings)
+        .onClick(() => this.setResultHeadingDisplay(!this.showResultHeadings));
+    });
+    if (typeof menu.addSeparator === "function") menu.addSeparator();
+    menu.addItem((item) => {
+      item
+        .setTitle("Group: Off")
         .setChecked(!this.groupResults)
         .onClick(() => this.setHeadingGrouping(false));
     });
     if (typeof menu.addSeparator === "function") menu.addSeparator();
-    const levels = ["top", 1, 2, 3, 4, 5, 6];
+    const levels = [1, 2, 3, 4, 5, 6];
     for (const level of levels) {
       menu.addItem((item) => {
         item
-          .setTitle(headingLevelMenuLabel(level))
+          .setTitle(`Group by ${headingLevelMenuLabel(level)}`)
           .setChecked(this.groupResults && this.headingGroupLevel === level)
           .onClick(() => this.setHeadingGrouping(true, level));
       });
@@ -1506,7 +1516,7 @@ class FindBar {
     }
     el.style.display = "block";
     const groupLevel = this.groupResults
-      ? resolveHeadingGroupLevel(this.docLines || [], this.headingGroupLevel)
+      ? normalizeHeadingGroupLevel(this.headingGroupLevel)
       : null;
     const groups = groupLevel
       ? this.matches.map((m) => headingGroupForLine(this.docLines || [], m.line, groupLevel))
@@ -1538,7 +1548,7 @@ class FindBar {
       if (i === this.current) row.addClass("is-active");
 
       // Second line: nearest precise heading above this match.
-      const head = nearestHeading(this.docLines, m.line);
+      const head = this.showResultHeadings ? nearestHeading(this.docLines, m.line) : null;
       if (head) row.addClass("has-head");
 
       const main = row.createDiv({ cls: "lf-main" });
