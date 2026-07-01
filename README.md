@@ -18,7 +18,8 @@ rendered text (tables included).
 - **Precise current-match highlight in tables**, mapped cell-by-cell from the
   source so the active match never lands on the wrong word.
 - **Result list** with line numbers and the matched term **bolded** in context;
-  click any row to jump.
+  click any row to jump. Results can be grouped by the top heading or a chosen
+  heading level.
 - **Match case** (`Aa`), **regular expression** (`.*`), and smarter
   **whole word** (`W`) toggles. Toggle choices are remembered.
 - **Prefill from selection** — select a word, trigger the command, and it's

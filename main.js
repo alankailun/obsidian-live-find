@@ -1,6 +1,6 @@
 "use strict";
 
-const { Plugin, MarkdownView, Notice, setIcon } = require("obsidian");
+const { Plugin, MarkdownView, Notice, setIcon, Menu } = require("obsidian");
 
 const HL_ALL = "live-find-all";
 const HL_CURRENT = "live-find-current";
@@ -21,7 +21,24 @@ const DEFAULT_FIND_OPTIONS = {
   caseSensitive: false,
   useRegex: false,
   wholeWord: false,
+  groupResults: false,
+  headingGroupLevel: "top",
 };
+
+function normalizeHeadingGroupLevel(value) {
+  if (value === "top") return value;
+  const n = Number(value);
+  if (Number.isInteger(n) && n >= 1 && n <= 6) return n;
+  return DEFAULT_FIND_OPTIONS.headingGroupLevel;
+}
+
+function headingLevelLabel(level) {
+  return level === "top" ? "HT" : `H${normalizeHeadingGroupLevel(level)}`;
+}
+
+function headingLevelMenuLabel(level) {
+  return level === "top" ? "Top heading" : `Heading ${normalizeHeadingGroupLevel(level)}`;
+}
 
 function normalizeFindOptions(options) {
   const src = options && typeof options === "object" ? options : {};
@@ -38,6 +55,11 @@ function normalizeFindOptions(options) {
       typeof src.wholeWord === "boolean"
         ? src.wholeWord
         : DEFAULT_FIND_OPTIONS.wholeWord,
+    groupResults:
+      typeof src.groupResults === "boolean"
+        ? src.groupResults
+        : DEFAULT_FIND_OPTIONS.groupResults,
+    headingGroupLevel: normalizeHeadingGroupLevel(src.headingGroupLevel),
   };
 }
 
@@ -597,14 +619,46 @@ function previousCellOf(line, ch) {
   return null;
 }
 
+function parseHeading(line, lineIdx) {
+  const m = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line || "");
+  if (!m) return null;
+  return { level: m[1].length, text: m[2], line: lineIdx };
+}
+
 /** Walk up source lines to find the nearest Markdown heading above `lineIdx`. */
-function nearestHeading(lines, lineIdx) {
+function nearestHeading(lines, lineIdx, maxLevel = 6) {
   for (let i = lineIdx; i >= 0; i--) {
-    const ln = lines[i];
-    const m = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(ln);
-    if (m) return { level: m[1].length, text: m[2] };
+    const heading = parseHeading(lines[i], i);
+    if (heading && heading.level <= maxLevel) return heading;
   }
   return null;
+}
+
+function topHeadingLevel(lines) {
+  let best = Infinity;
+  for (let i = 0; i < lines.length; i++) {
+    const heading = parseHeading(lines[i], i);
+    if (heading && heading.level < best) best = heading.level;
+  }
+  return Number.isFinite(best) ? best : 1;
+}
+
+function resolveHeadingGroupLevel(lines, level) {
+  return level === "top" ? topHeadingLevel(lines || []) : normalizeHeadingGroupLevel(level);
+}
+
+function cleanHeadingText(text) {
+  return (text || "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function headingGroupForLine(lines, lineIdx, maxLevel) {
+  const heading = nearestHeading(lines, lineIdx, maxLevel);
+  if (heading) return { ...heading, text: cleanHeadingText(heading.text) };
+  return { level: 0, line: -1, text: "No heading" };
+}
+
+function headingGroupKey(group) {
+  return `${group.line}:${group.level}:${group.text}`;
 }
 
 /** Strip common Markdown noise from a source line for clean list snippets. */
@@ -947,6 +1001,8 @@ class FindBar {
     this.caseSensitive = options.caseSensitive;
     this.useRegex = options.useRegex;
     this.wholeWord = options.wholeWord;
+    this.groupResults = options.groupResults;
+    this.headingGroupLevel = options.headingGroupLevel;
     this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
     this.currentDomRange = null; // anchored current range in reading mode
     this.barEl = null;
@@ -979,6 +1035,15 @@ class FindBar {
     if (this.caseBtn) this.caseBtn.toggleClass("is-on", this.caseSensitive);
     if (this.regexBtn) this.regexBtn.toggleClass("is-on", this.useRegex);
     if (this.wordBtn) this.wordBtn.toggleClass("is-on", this.wholeWord);
+    if (this.groupBtn) {
+      this.groupBtn.toggleClass("is-on", this.groupResults);
+      this.groupBtn.setText(
+        this.groupResults ? headingLevelLabel(this.headingGroupLevel) : "H-"
+      );
+      this.groupBtn.title = this.groupResults
+        ? `Grouped by ${headingLevelMenuLabel(this.headingGroupLevel)}`
+        : "Group results by heading";
+    }
   }
 
   persistFindOptions() {
@@ -987,6 +1052,8 @@ class FindBar {
         caseSensitive: this.caseSensitive,
         useRegex: this.useRegex,
         wholeWord: this.wholeWord,
+        groupResults: this.groupResults,
+        headingGroupLevel: this.headingGroupLevel,
       });
     }
   }
@@ -997,6 +1064,38 @@ class FindBar {
     this.persistFindOptions();
     this.search(this.input.value);
     this.input.focus();
+  }
+
+  setHeadingGrouping(groupResults, headingGroupLevel = this.headingGroupLevel) {
+    this.groupResults = !!groupResults;
+    this.headingGroupLevel = normalizeHeadingGroupLevel(headingGroupLevel);
+    this.syncToggleButtons();
+    this.persistFindOptions();
+    this.renderList();
+    this.markActiveRow();
+    if (this.input) this.input.focus();
+  }
+
+  showHeadingGroupMenu(evt) {
+    evt.preventDefault();
+    const menu = new Menu();
+    menu.addItem((item) => {
+      item
+        .setTitle("Off")
+        .setChecked(!this.groupResults)
+        .onClick(() => this.setHeadingGrouping(false));
+    });
+    if (typeof menu.addSeparator === "function") menu.addSeparator();
+    const levels = ["top", 1, 2, 3, 4, 5, 6];
+    for (const level of levels) {
+      menu.addItem((item) => {
+        item
+          .setTitle(headingLevelMenuLabel(level))
+          .setChecked(this.groupResults && this.headingGroupLevel === level)
+          .onClick(() => this.setHeadingGrouping(true, level));
+      });
+    }
+    menu.showAtMouseEvent(evt);
   }
 
   open() {
@@ -1021,6 +1120,8 @@ class FindBar {
     this.regexBtn.title = "Use regular expression";
     this.wordBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "W" });
     this.wordBtn.title = "Match whole word";
+    this.groupBtn = bar.createEl("button", { cls: "lf-btn lf-toggle lf-heading-toggle", text: "H-" });
+    this.groupBtn.title = "Group results by heading";
     this.syncToggleButtons();
 
     this.countEl = bar.createSpan({ cls: "lf-count", text: "" });
@@ -1047,6 +1148,7 @@ class FindBar {
     this.wordBtn.onclick = () => {
       this.setSearchOption("wholeWord", !this.wholeWord);
     };
+    this.groupBtn.onclick = (evt) => this.showHeadingGroupMenu(evt);
 
     this.resultsEl = host.createDiv({ cls: "lf-results" });
     this.resultsEl.style.display = "none";
@@ -1403,11 +1505,39 @@ class FindBar {
       return;
     }
     el.style.display = "block";
+    const groupLevel = this.groupResults
+      ? resolveHeadingGroupLevel(this.docLines || [], this.headingGroupLevel)
+      : null;
+    const groups = groupLevel
+      ? this.matches.map((m) => headingGroupForLine(this.docLines || [], m.line, groupLevel))
+      : [];
+    const groupCounts = new Map();
+    for (const group of groups) {
+      const key = headingGroupKey(group);
+      groupCounts.set(key, (groupCounts.get(key) || 0) + 1);
+    }
+
+    let lastGroupKey = null;
     this.matches.forEach((m, i) => {
+      const group = groupLevel ? groups[i] : null;
+      if (group) {
+        const key = headingGroupKey(group);
+        if (key !== lastGroupKey) {
+          lastGroupKey = key;
+          const groupEl = el.createDiv({ cls: "lf-group" });
+          groupEl.createSpan({ cls: "lf-group-title", text: group.text });
+          groupEl.createSpan({
+            cls: "lf-group-count",
+            text: String(groupCounts.get(key) || 0),
+          });
+        }
+      }
+
       const row = el.createDiv({ cls: "lf-row" });
+      row.dataset.matchIndex = String(i);
       if (i === this.current) row.addClass("is-active");
 
-      // Second line: nearest heading above this match (always on).
+      // Second line: nearest precise heading above this match.
       const head = nearestHeading(this.docLines, m.line);
       if (head) row.addClass("has-head");
 
@@ -1431,9 +1561,8 @@ class FindBar {
         );
       }
 
-      if (head) {
-        const clean = head.text.replace(/[*_`]/g, "").trim();
-        row.createDiv({ cls: "lf-head" }).setText(clean);
+      if (head && (!group || head.line !== group.line)) {
+        row.createDiv({ cls: "lf-head" }).setText(cleanHeadingText(head.text));
       }
 
       row.onclick = () => {
@@ -1448,10 +1577,12 @@ class FindBar {
 
   markActiveRow() {
     if (!this.resultsEl) return;
-    const rows = this.resultsEl.children;
-    for (let i = 0; i < rows.length; i++) {
-      rows[i].toggleClass("is-active", i === this.current);
-      if (i === this.current) rows[i].scrollIntoView({ block: "nearest" });
+    const rows = this.resultsEl.querySelectorAll(".lf-row");
+    for (const row of rows) {
+      const i = Number(row.dataset.matchIndex);
+      const active = i === this.current;
+      row.toggleClass("is-active", active);
+      if (active) row.scrollIntoView({ block: "nearest" });
     }
   }
 }
@@ -1515,6 +1646,9 @@ module.exports = class LiveFindPlugin extends Plugin {
         width: auto; min-width: 26px; padding: 0 6px;
         font-size: 11px; font-weight: 600;
       }
+      .lf-find-bar .lf-toggle.lf-heading-toggle {
+        min-width: 30px;
+      }
       .lf-find-bar .lf-toggle.is-on {
         background: var(--interactive-accent) !important;
         color: var(--text-on-accent) !important;
@@ -1531,6 +1665,22 @@ module.exports = class LiveFindPlugin extends Plugin {
       .lf-results .lf-row {
         display: flex; flex-direction: column; gap: 2px;
         padding: 5px 8px; cursor: pointer; border-radius: 6px; font-size: 13px;
+      }
+      .lf-results .lf-group {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 8px 8px 3px;
+        color: var(--text-muted); font-size: 11px; font-weight: 600;
+        border-top: 1px solid var(--background-modifier-border);
+      }
+      .lf-results .lf-group:first-child {
+        border-top: none; padding-top: 3px;
+      }
+      .lf-results .lf-group-title {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .lf-results .lf-group-count {
+        flex: 0 0 auto; color: var(--text-faint);
+        font-variant-numeric: tabular-nums;
       }
       .lf-results .lf-main {
         display: flex; align-items: baseline; gap: 6px;
