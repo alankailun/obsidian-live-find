@@ -1123,7 +1123,7 @@ class FindBar {
     this.input = bar.createEl("input", {
       cls: "lf-input",
       type: "text",
-      placeholder: "Find in note…",
+      placeholder: "Search current note...",
     });
 
     this.caseBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "Aa" });
@@ -1678,7 +1678,7 @@ module.exports = class LiveFindPlugin extends Plugin {
 
     this.addCommand({
       id: "find-in-note-rendered",
-      name: "Find in note (top bar)",
+      name: "Open find bar",
       callback: () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) return new Notice("Open a Markdown note first.");

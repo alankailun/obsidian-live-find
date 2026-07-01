@@ -30,7 +30,7 @@ rendered text (tables included).
 
 ## Usage
 
-Run the command **"Find in note (top bar)"**. The bar appears at the top-right
+Run the command **"Open find bar"**. The bar appears at the top-right
 of the note.
 
 To use it as a true browser-style `Cmd/Ctrl+F`, bind the command in
