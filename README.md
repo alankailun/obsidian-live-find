@@ -19,7 +19,8 @@ rendered text (tables included).
   source so the active match never lands on the wrong word.
 - **Result list** with line numbers and the matched term **bolded** in context;
   click any row to jump. Results can be grouped by a chosen heading level, and
-  per-row heading hints can be toggled.
+  per-row heading hints can be toggled. Group headings stick while scrolling,
+  and the counter shows the active match's position within its heading group.
 - **Match case** (`Aa`), **regular expression** (`.*`), and smarter
   **whole word** (`W`) toggles. Toggle choices are remembered.
 - **Prefill from selection** — select a word, trigger the command, and it's

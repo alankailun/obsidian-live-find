@@ -1063,9 +1063,11 @@ class FindBar {
   setHeadingGrouping(groupResults, headingGroupLevel = this.headingGroupLevel) {
     this.groupResults = !!groupResults;
     this.headingGroupLevel = normalizeHeadingGroupLevel(headingGroupLevel);
+    this.matchGroupInfo = null;
     this.syncToggleButtons();
     this.persistFindOptions();
     this.renderList();
+    this.updateCount();
     this.markActiveRow();
     if (this.input) this.input.focus();
   }
@@ -1416,6 +1418,7 @@ class FindBar {
     const text = this.editor.getValue();
     this.docLines = text.split("\n");
     this.matches = findSourceMatches(this.docLines, this.matcher);
+    this.matchGroupInfo = null;
     // Reading mode: drop source matches that are not visible in the rendered
     // preview, such as image syntax, link URLs, wikilink targets and table
     // delimiter rows. This avoids empty-looking results.
@@ -1503,7 +1506,59 @@ class FindBar {
     }
     this.countEl.title = "";
     this.countEl.removeClass("is-empty");
-    this.countEl.setText(`${this.current + 1}/${this.matches.length}`);
+    let text = `${this.current + 1}/${this.matches.length}`;
+    const groupInfo = this.getMatchGroupInfo();
+    if (groupInfo) {
+      const active = groupInfo.items[this.current];
+      if (active) {
+        text += ` · ${active.indexInGroup}/${active.totalInGroup}`;
+        this.countEl.title =
+          `${active.group.text}: ${active.indexInGroup}/${active.totalInGroup}`;
+      }
+    }
+    this.countEl.setText(text);
+  }
+
+  getMatchGroupInfo() {
+    if (!this.groupResults || !this.matches.length) return null;
+    if (
+      this.matchGroupInfo &&
+      this.matchGroupInfo.matchCount === this.matches.length &&
+      this.matchGroupInfo.headingGroupLevel === this.headingGroupLevel
+    ) {
+      return this.matchGroupInfo;
+    }
+
+    const groupLevel = normalizeHeadingGroupLevel(this.headingGroupLevel);
+    const groups = this.matches.map((m) =>
+      headingGroupForLine(this.docLines || [], m.line, groupLevel)
+    );
+    const totals = new Map();
+    for (const group of groups) {
+      const key = headingGroupKey(group);
+      totals.set(key, (totals.get(key) || 0) + 1);
+    }
+
+    const seen = new Map();
+    const items = groups.map((group) => {
+      const key = headingGroupKey(group);
+      const indexInGroup = (seen.get(key) || 0) + 1;
+      seen.set(key, indexInGroup);
+      return {
+        group,
+        key,
+        indexInGroup,
+        totalInGroup: totals.get(key) || 0,
+      };
+    });
+
+    this.matchGroupInfo = {
+      headingGroupLevel: this.headingGroupLevel,
+      matchCount: this.matches.length,
+      items,
+      totals,
+    };
+    return this.matchGroupInfo;
   }
 
   renderList() {
@@ -1515,30 +1570,20 @@ class FindBar {
       return;
     }
     el.style.display = "block";
-    const groupLevel = this.groupResults
-      ? normalizeHeadingGroupLevel(this.headingGroupLevel)
-      : null;
-    const groups = groupLevel
-      ? this.matches.map((m) => headingGroupForLine(this.docLines || [], m.line, groupLevel))
-      : [];
-    const groupCounts = new Map();
-    for (const group of groups) {
-      const key = headingGroupKey(group);
-      groupCounts.set(key, (groupCounts.get(key) || 0) + 1);
-    }
+    const groupInfo = this.getMatchGroupInfo();
 
     let lastGroupKey = null;
     this.matches.forEach((m, i) => {
-      const group = groupLevel ? groups[i] : null;
-      if (group) {
-        const key = headingGroupKey(group);
-        if (key !== lastGroupKey) {
-          lastGroupKey = key;
+      const groupItem = groupInfo ? groupInfo.items[i] : null;
+      const group = groupItem ? groupItem.group : null;
+      if (groupItem) {
+        if (groupItem.key !== lastGroupKey) {
+          lastGroupKey = groupItem.key;
           const groupEl = el.createDiv({ cls: "lf-group" });
           groupEl.createSpan({ cls: "lf-group-title", text: group.text });
           groupEl.createSpan({
             cls: "lf-group-count",
-            text: String(groupCounts.get(key) || 0),
+            text: String(groupItem.totalInGroup),
           });
         }
       }
@@ -1631,7 +1676,7 @@ module.exports = class LiveFindPlugin extends Plugin {
       }
       .lf-find-bar .lf-count {
         font-size: 12px; color: var(--text-muted);
-        min-width: 46px; text-align: right; padding: 0 4px;
+        min-width: 78px; text-align: right; padding: 0 4px;
         font-variant-numeric: tabular-nums; white-space: nowrap;
       }
       .lf-find-bar .lf-count.is-empty { color: var(--text-error); }
@@ -1675,12 +1720,16 @@ module.exports = class LiveFindPlugin extends Plugin {
       .lf-results .lf-row {
         display: flex; flex-direction: column; gap: 2px;
         padding: 5px 8px; cursor: pointer; border-radius: 6px; font-size: 13px;
+        scroll-margin-top: 28px;
       }
       .lf-results .lf-group {
+        position: sticky; top: -4px; z-index: 1;
         display: flex; align-items: center; justify-content: space-between; gap: 8px;
         padding: 8px 8px 3px;
         color: var(--text-muted); font-size: 11px; font-weight: 600;
+        background: var(--background-primary);
         border-top: 1px solid var(--background-modifier-border);
+        box-shadow: 0 1px 0 var(--background-modifier-border);
       }
       .lf-results .lf-group:first-child {
         border-top: none; padding-top: 3px;
