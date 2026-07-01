@@ -1506,17 +1506,8 @@ class FindBar {
     }
     this.countEl.title = "";
     this.countEl.removeClass("is-empty");
-    let text = `${this.current + 1}/${this.matches.length}`;
-    const groupInfo = this.getMatchGroupInfo();
-    if (groupInfo) {
-      const active = groupInfo.items[this.current];
-      if (active) {
-        text += ` · ${active.indexInGroup}/${active.totalInGroup}`;
-        this.countEl.title =
-          `${active.group.text}: ${active.indexInGroup}/${active.totalInGroup}`;
-      }
-    }
-    this.countEl.setText(text);
+    this.countEl.setText(`${this.current + 1}/${this.matches.length}`);
+    this.updateGroupCounts();
   }
 
   getMatchGroupInfo() {
@@ -1580,6 +1571,9 @@ class FindBar {
         if (groupItem.key !== lastGroupKey) {
           lastGroupKey = groupItem.key;
           const groupEl = el.createDiv({ cls: "lf-group" });
+          groupEl.dataset.groupKey = groupItem.key;
+          groupEl.dataset.groupTitle = group.text;
+          groupEl.dataset.groupTotal = String(groupItem.totalInGroup);
           groupEl.createSpan({ cls: "lf-group-title", text: group.text });
           groupEl.createSpan({
             cls: "lf-group-count",
@@ -1628,6 +1622,36 @@ class FindBar {
         if (this.input) this.input.focus(); // keep keyboard nav alive
       };
     });
+    this.updateGroupCounts();
+  }
+
+  setText(el, text) {
+    if (!el) return;
+    if (typeof el.setText === "function") el.setText(text);
+    else el.textContent = text;
+  }
+
+  updateGroupCounts() {
+    if (!this.resultsEl) return;
+    const groupInfo = this.getMatchGroupInfo();
+    if (!groupInfo) return;
+
+    const active = groupInfo.items[this.current];
+    const groups = this.resultsEl.querySelectorAll(".lf-group");
+    for (const groupEl of groups) {
+      const key = groupEl.dataset.groupKey;
+      const countEl = groupEl.querySelector(".lf-group-count");
+      const total = groupInfo.totals.get(key) || Number(groupEl.dataset.groupTotal) || 0;
+      const isActive = !!active && key === active.key;
+      groupEl.toggleClass("is-active", isActive);
+      this.setText(
+        countEl,
+        isActive ? `${active.indexInGroup}/${active.totalInGroup}` : String(total)
+      );
+      groupEl.title = isActive
+        ? `${active.group.text}: ${active.indexInGroup}/${active.totalInGroup}`
+        : `${groupEl.dataset.groupTitle || "Heading"}: ${total}`;
+    }
   }
 
   markActiveRow() {
@@ -1639,6 +1663,7 @@ class FindBar {
       row.toggleClass("is-active", active);
       if (active) row.scrollIntoView({ block: "nearest" });
     }
+    this.updateGroupCounts();
   }
 }
 
@@ -1676,7 +1701,7 @@ module.exports = class LiveFindPlugin extends Plugin {
       }
       .lf-find-bar .lf-count {
         font-size: 12px; color: var(--text-muted);
-        min-width: 78px; text-align: right; padding: 0 4px;
+        min-width: 46px; text-align: right; padding: 0 4px;
         font-variant-numeric: tabular-nums; white-space: nowrap;
       }
       .lf-find-bar .lf-count.is-empty { color: var(--text-error); }
@@ -1740,6 +1765,9 @@ module.exports = class LiveFindPlugin extends Plugin {
       .lf-results .lf-group-count {
         flex: 0 0 auto; color: var(--text-faint);
         font-variant-numeric: tabular-nums;
+      }
+      .lf-results .lf-group.is-active .lf-group-count {
+        color: var(--text-accent);
       }
       .lf-results .lf-main {
         display: flex; align-items: baseline; gap: 6px;
