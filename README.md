@@ -23,6 +23,8 @@ rendered text (tables included).
   and the active heading count shows the match's position within that group.
 - **Match case** (`Aa`), **regular expression** (`.*`), and smarter
   **whole word** (`W`) toggles. Toggle choices are remembered.
+- **Chrome-like plain searches** ignore leading/trailing spaces and match
+  repeated whitespace flexibly.
 - **Prefill from selection** — select a word, trigger the command, and it's
   searched instantly.
 - **Keyboard navigation** — `Enter` / `↓` next, `Shift+Enter` / `↑` previous,

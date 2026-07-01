@@ -97,12 +97,30 @@ const TOKEN_CHAR_RE = (() => {
 })();
 
 const BOUNDARYLESS_SCRIPT_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/;
+const PLAIN_QUERY_WHITESPACE_RE = /\s+/;
+
+function escapeRegExp(text) {
+  return text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function normalizePlainQuery(query) {
+  return (query || "").trim();
+}
+
+function buildPlainWhitespaceRegex(query, caseSensitive) {
+  const parts = query.split(PLAIN_QUERY_WHITESPACE_RE).filter(Boolean);
+  if (!parts.length) return null;
+  return new RegExp(
+    parts.map(escapeRegExp).join("\\s+"),
+    "g" + (caseSensitive ? "" : "i")
+  );
+}
 
 /** Build a matcher from query + flags. Returns null if no query. */
 function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
   if (!query) return null;
-  const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(query);
   if (useRegex) {
+    const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(query);
     try {
       return {
         regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")),
@@ -113,8 +131,20 @@ function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
       return { invalid: true, error: e && e.message ? e.message : "Invalid regular expression" };
     }
   }
+
+  const plainQuery = normalizePlainQuery(query);
+  if (!plainQuery) return null;
+  const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(plainQuery);
+  if (PLAIN_QUERY_WHITESPACE_RE.test(plainQuery)) {
+    return {
+      regex: buildPlainWhitespaceRegex(plainQuery, caseSensitive),
+      wholeWord: !!wholeWord,
+      useWordBoundaries,
+    };
+  }
+
   return {
-    needle: caseSensitive ? query : query.toLowerCase(),
+    needle: caseSensitive ? plainQuery : plainQuery.toLowerCase(),
     caseSensitive,
     wholeWord: !!wholeWord,
     useWordBoundaries,
