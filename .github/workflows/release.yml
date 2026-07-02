@@ -13,6 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
 
       - name: Create release
         env:
@@ -22,10 +28,12 @@ jobs:
           cat > release-notes.md <<EOF
           Live Find $TAG
 
+          - Source split into maintainable modules and bundled for Obsidian.
+          - More stable pasted-search jumps.
+          - Live Preview / Reading searches skip hidden Markdown syntax targets.
           - Smarter whole-word matching for mixed English, Unicode, and CJK text.
           - Remembered find options across sessions.
           - Heading-grouped result lists with sticky group headers.
-          - Scoped match counts in active heading groups.
           EOF
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" \
