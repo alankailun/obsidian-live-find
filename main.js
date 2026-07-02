@@ -97,23 +97,9 @@ const TOKEN_CHAR_RE = (() => {
 })();
 
 const BOUNDARYLESS_SCRIPT_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/;
-const PLAIN_QUERY_WHITESPACE_RE = /\s+/;
-
-function escapeRegExp(text) {
-  return text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-}
 
 function normalizePlainQuery(query) {
   return (query || "").trim();
-}
-
-function buildPlainWhitespaceRegex(query, caseSensitive) {
-  const parts = query.split(PLAIN_QUERY_WHITESPACE_RE).filter(Boolean);
-  if (!parts.length) return null;
-  return new RegExp(
-    parts.map(escapeRegExp).join("\\s+"),
-    "g" + (caseSensitive ? "" : "i")
-  );
 }
 
 /** Build a matcher from query + flags. Returns null if no query. */
@@ -135,14 +121,6 @@ function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
   const plainQuery = normalizePlainQuery(query);
   if (!plainQuery) return null;
   const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(plainQuery);
-  if (PLAIN_QUERY_WHITESPACE_RE.test(plainQuery)) {
-    return {
-      regex: buildPlainWhitespaceRegex(plainQuery, caseSensitive),
-      wholeWord: !!wholeWord,
-      useWordBoundaries,
-    };
-  }
-
   return {
     needle: caseSensitive ? plainQuery : plainQuery.toLowerCase(),
     caseSensitive,
@@ -1201,6 +1179,18 @@ class FindBar {
       DEBOUNCE_MS
     );
     this.input.addEventListener("input", this.onInput);
+    this.onPaste = (e) => {
+      if (this.useRegex || !e.clipboardData) return;
+      const text = e.clipboardData.getData("text");
+      const trimmed = normalizePlainQuery(text);
+      if (trimmed === text) return;
+      e.preventDefault();
+      const start = this.input.selectionStart ?? this.input.value.length;
+      const end = this.input.selectionEnd ?? start;
+      this.input.setRangeText(trimmed, start, end, "end");
+      this.input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    this.input.addEventListener("paste", this.onPaste);
     this.onKeydown = (e) => {
       // Don't hijack keys while an IME is composing (e.g. Chinese pinyin Enter
       // commits the candidate — we'd otherwise step the search).
@@ -1279,6 +1269,9 @@ class FindBar {
     if (this.input && this.onInput) {
       this.input.removeEventListener("input", this.onInput);
     }
+    if (this.input && this.onPaste) {
+      this.input.removeEventListener("paste", this.onPaste);
+    }
     if (this.input && this.onKeydown) {
       this.input.removeEventListener("keydown", this.onKeydown);
     }
@@ -1299,6 +1292,7 @@ class FindBar {
     this.barEl = null;
     this.resultsEl = null;
     this.input = null;
+    this.onPaste = null;
     this.onKeydown = null;
     this.onEditorChange = null;
     this.matches = [];
