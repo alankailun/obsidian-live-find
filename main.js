@@ -1026,10 +1026,31 @@ class FindBar {
     }
   }
 
-  refreshCurrentSearch() {
+  refreshCurrentSearch(options = {}) {
     if (!this.barEl) return;
-    if (this.query) this.search(this.query);
+    const query = this.input ? this.input.value : this.query;
+    if (query) this.search(query, options);
     else this.clearHighlights();
+  }
+
+  closestMatchIndex(previousMatch, previousCurrent) {
+    if (!this.matches.length) return -1;
+    if (!previousMatch) {
+      return Math.min(Math.max(previousCurrent, 0), this.matches.length - 1);
+    }
+
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    this.matches.forEach((m, i) => {
+      const distance =
+        Math.abs(m.line - previousMatch.line) * 100000 +
+        Math.abs(m.ch - previousMatch.ch);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = i;
+      }
+    });
+    return bestIndex;
   }
 
   syncToggleButtons() {
@@ -1234,7 +1255,7 @@ class FindBar {
       if (!this.barEl) return;
       const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
       if (active !== this.view) return;
-      this.refreshCurrentSearch();
+      this.refreshCurrentSearch({ preserveCurrent: true, jump: false });
     }, DEBOUNCE_MS);
     this.editorChangeEvt = this.plugin.app.workspace.on(
       "editor-change",
@@ -1432,11 +1453,16 @@ class FindBar {
     this.domApply(dom, currentRange);
   }
 
-  search(query) {
+  search(query, options = {}) {
     if (!this.barEl || !this.resultsEl) return;
 
-    this.query = query;
-    this.matcher = buildMatcher(query, this.caseSensitive, this.useRegex, this.wholeWord);
+    const previousCurrent = this.current;
+    const previousMatch = options.preserveCurrent ? this.matches[previousCurrent] : null;
+    const shouldJump = options.jump !== false;
+    const effectiveQuery = this.useRegex ? query : normalizePlainQuery(query);
+
+    this.query = effectiveQuery;
+    this.matcher = buildMatcher(effectiveQuery, this.caseSensitive, this.useRegex, this.wholeWord);
     this.domMode = this.view.getMode() === "preview";
     // Both modes: complete whole-note search from the source.
     const text = this.editor.getValue();
@@ -1461,11 +1487,16 @@ class FindBar {
         return !isInsideSpan(m.ch, spans);
       });
     }
-    this.current = this.matches.length ? 0 : -1;
+    this.current = this.matches.length
+      ? options.preserveCurrent
+        ? this.closestMatchIndex(previousMatch, previousCurrent)
+        : 0
+      : -1;
     this.currentDomRange = null;
     this.renderList();
     this.updateCount();
-    if (this.current >= 0) this.jumpToCurrent();
+    if (this.current >= 0 && shouldJump) this.jumpToCurrent();
+    else if (this.current >= 0) this.refreshHighlights();
     else this.clearHighlights();
   }
 
