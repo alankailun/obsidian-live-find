@@ -46,11 +46,6 @@ To use it as a true browser-style `Cmd/Ctrl+F`, bind the command in
 3. Reload Obsidian and enable **Live Find** in
    **Settings -> Community plugins**.
 
-## Development
-
-Source code lives in `src/`. Run `npm install` once, then `npm run build` to
-bundle the plugin into the root `main.js` file that Obsidian loads.
-
 ## Limitations
 
 Highlighting relies on rendered DOM, and Obsidian virtualizes off-screen
