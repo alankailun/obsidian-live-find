@@ -205,6 +205,12 @@ function getRenderRoot(view) {
   );
 }
 
+function isLivePreviewMode(view) {
+  if (!view || !view.containerEl || typeof view.getMode !== "function") return false;
+  if (view.getMode() !== "source") return false;
+  return !!view.containerEl.querySelector(".markdown-source-view.is-live-preview");
+}
+
 function getScroller(view) {
   if (!view || !view.containerEl) return null;
   return view.containerEl.querySelector(SELECTORS.scroller);
@@ -1005,13 +1011,20 @@ class FindBar {
     this.headingGroupLevel = options.headingGroupLevel;
     this.showResultHeadings = options.showResultHeadings;
     this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
+    this.renderedTextMode = false; // reading/live preview hide some Markdown syntax
     this.currentDomRange = null; // anchored current range in reading mode
+    this.highlightToken = 0;
     this.barEl = null;
     this.resultsEl = null;
   }
 
   isOpen() {
     return !!this.barEl;
+  }
+
+  nextHighlightToken() {
+    this.highlightToken += 1;
+    return this.highlightToken;
   }
 
   updateScroller() {
@@ -1031,6 +1044,11 @@ class FindBar {
     const query = this.input ? this.input.value : this.query;
     if (query) this.search(query, options);
     else this.clearHighlights();
+  }
+
+  flushInputSearch() {
+    if (this.onInput && this.onInput.cancel) this.onInput.cancel();
+    if (this.input) this.search(this.input.value);
   }
 
   closestMatchIndex(previousMatch, previousCurrent) {
@@ -1201,15 +1219,21 @@ class FindBar {
     );
     this.input.addEventListener("input", this.onInput);
     this.onPaste = (e) => {
-      if (this.useRegex || !e.clipboardData) return;
+      if (this.useRegex || !e.clipboardData) {
+        setTimeout(() => this.flushInputSearch(), 0);
+        return;
+      }
       const text = e.clipboardData.getData("text");
       const trimmed = normalizePlainQuery(text);
-      if (trimmed === text) return;
+      if (trimmed === text) {
+        setTimeout(() => this.flushInputSearch(), 0);
+        return;
+      }
       e.preventDefault();
       const start = this.input.selectionStart ?? this.input.value.length;
       const end = this.input.selectionEnd ?? start;
       this.input.setRangeText(trimmed, start, end, "end");
-      this.input.dispatchEvent(new Event("input", { bubbles: true }));
+      this.flushInputSearch();
     };
     this.input.addEventListener("paste", this.onPaste);
     this.onKeydown = (e) => {
@@ -1308,6 +1332,7 @@ class FindBar {
     this.editorChangeEvt = null;
 
     this.clearHighlights();
+    this.nextHighlightToken();
     if (this.barEl) this.barEl.remove();
     if (this.resultsEl) this.resultsEl.remove();
     this.barEl = null;
@@ -1340,7 +1365,8 @@ class FindBar {
     }
   }
 
-  refreshHighlights() {
+  refreshHighlights(token = this.highlightToken) {
+    if (token !== this.highlightToken) return;
     if (!this.barEl) return; // bail if a late timer fires after close()
     if (!(window.CSS && CSS.highlights && window.Highlight)) return;
     if (!this.query || !this.matcher || this.matcher.invalid)
@@ -1464,15 +1490,15 @@ class FindBar {
     this.query = effectiveQuery;
     this.matcher = buildMatcher(effectiveQuery, this.caseSensitive, this.useRegex, this.wholeWord);
     this.domMode = this.view.getMode() === "preview";
+    this.renderedTextMode = this.domMode || isLivePreviewMode(this.view);
     // Both modes: complete whole-note search from the source.
     const text = this.editor.getValue();
     this.docLines = text.split("\n");
     this.matches = findSourceMatches(this.docLines, this.matcher);
     this.matchGroupInfo = null;
-    // Reading mode: drop source matches that are not visible in the rendered
-    // preview, such as image syntax, link URLs, wikilink targets and table
-    // delimiter rows. This avoids empty-looking results.
-    if (this.domMode && this.matches.length) {
+    // Rendered modes hide some Markdown source syntax. Drop matches inside
+    // those hidden ranges so jump/search defaults land on visible text.
+    if (this.renderedTextMode && this.matches.length) {
       const cache = new Map();
       this.matches = this.matches.filter((m) => {
         const line = this.docLines[m.line] || "";
@@ -1495,20 +1521,21 @@ class FindBar {
     this.currentDomRange = null;
     this.renderList();
     this.updateCount();
-    if (this.current >= 0 && shouldJump) this.jumpToCurrent();
-    else if (this.current >= 0) this.refreshHighlights();
+    const token = this.nextHighlightToken();
+    if (this.current >= 0 && shouldJump) this.jumpToCurrent(token);
+    else if (this.current >= 0) this.refreshHighlights(token);
     else this.clearHighlights();
   }
 
   step(dir) {
     if (!this.matches.length) return;
     this.current = (this.current + dir + this.matches.length) % this.matches.length;
-    this.jumpToCurrent();
+    this.jumpToCurrent(this.nextHighlightToken());
     this.updateCount();
     this.markActiveRow();
   }
 
-  jumpToCurrent() {
+  jumpToCurrent(token = this.nextHighlightToken()) {
     const m = this.matches[this.current];
     if (!m) return;
     if (this.domMode) {
@@ -1521,9 +1548,9 @@ class FindBar {
         debugWarn("applyScroll", e);
       }
       this.currentDomRange = null; // recompute fresh for the new selection
-      this.refreshHighlights();
-      setTimeout(() => this.refreshHighlights(), 90);
-      setTimeout(() => this.refreshHighlights(), 220);
+      this.refreshHighlights(token);
+      setTimeout(() => this.refreshHighlights(token), 90);
+      setTimeout(() => this.refreshHighlights(token), 220);
       return;
     }
     const from = { line: m.line, ch: m.ch };
@@ -1533,8 +1560,8 @@ class FindBar {
     } catch (e) {
       debugWarn("scrollIntoView", e);
     }
-    this.refreshHighlights();
-    setTimeout(() => this.refreshHighlights(), 60);
+    this.refreshHighlights(token);
+    setTimeout(() => this.refreshHighlights(token), 60);
   }
 
   updateCount() {
@@ -1653,7 +1680,7 @@ class FindBar {
         m,
         this.docLines || [],
         this.matcher,
-        this.domMode
+        this.renderedTextMode
       );
       if (snippet) {
         appendHighlightedSnippet(
@@ -1671,7 +1698,7 @@ class FindBar {
 
       row.onclick = () => {
         this.current = i;
-        this.jumpToCurrent();
+        this.jumpToCurrent(this.nextHighlightToken());
         this.updateCount();
         this.markActiveRow();
         if (this.input) this.input.focus(); // keep keyboard nav alive
