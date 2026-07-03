@@ -1022,6 +1022,10 @@ class FindBar {
     return !!this.barEl;
   }
 
+  viewModeKey() {
+    return `${this.view.getMode()}:${isLivePreviewMode(this.view) ? "live" : "plain"}`;
+  }
+
   nextHighlightToken() {
     this.highlightToken += 1;
     return this.highlightToken;
@@ -1264,10 +1268,10 @@ class FindBar {
 
     // Re-run search when the user toggles Source / Live Preview / Reading
     // inside the same tab, so domMode, highlights and snippets stay accurate.
-    this.lastViewMode = this.view.getMode();
+    this.lastViewMode = this.viewModeKey();
     this.layoutEvt = this.plugin.app.workspace.on("layout-change", () => {
       if (!this.barEl) return;
-      const mode = this.view.getMode();
+      const mode = this.viewModeKey();
       if (mode === this.lastViewMode) return;
       this.lastViewMode = mode;
       this.updateScroller();
