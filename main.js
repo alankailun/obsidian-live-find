@@ -1543,7 +1543,14 @@ class FindBar {
       // refreshHighlights map the current match by content.
       try {
         const pm = this.view.previewMode || this.view.currentMode;
-        if (pm && typeof pm.applyScroll === "function") pm.applyScroll(m.line);
+        const renderer = pm && pm.renderer;
+        if (renderer && typeof renderer.applyScrollDelayed === "function") {
+          renderer.applyScrollDelayed(m.line, { center: true, highlight: true });
+        } else if (renderer && typeof renderer.applyScroll === "function") {
+          renderer.applyScroll(m.line, { center: true, highlight: true });
+        } else if (pm && typeof pm.applyScroll === "function") {
+          pm.applyScroll(m.line);
+        }
       } catch (e) {
         debugWarn("applyScroll", e);
       }
@@ -1555,6 +1562,38 @@ class FindBar {
     }
     const from = { line: m.line, ch: m.ch };
     const to = { line: m.line, ch: m.ch + m.len };
+    let fromOffset = null;
+    let toOffset = null;
+    try {
+      fromOffset = this.editor.posToOffset(from);
+      toOffset = this.editor.posToOffset(to);
+    } catch (e) {
+      debugWarn("source posToOffset", e);
+    }
+    try {
+      const cm = getEditorView(this.editor);
+      if (
+        cm &&
+        typeof cm.dispatch === "function" &&
+        fromOffset != null &&
+        toOffset != null
+      ) {
+        cm.dispatch({
+          selection: { anchor: fromOffset, head: toOffset },
+          scrollIntoView: true,
+        });
+      } else if (typeof this.editor.setSelection === "function") {
+        this.editor.setSelection(from, to);
+      }
+    } catch (e) {
+      debugWarn("source selection", e);
+    }
+    try {
+      const mode = this.view.currentMode || this.view.sourceMode;
+      if (mode && typeof mode.applyScroll === "function") mode.applyScroll(m.line);
+    } catch (e) {
+      debugWarn("source applyScroll", e);
+    }
     try {
       this.editor.scrollIntoView({ from, to }, true);
     } catch (e) {
