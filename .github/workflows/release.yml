@@ -22,9 +22,9 @@ jobs:
           cat > release-notes.md <<EOF
           Live Find $TAG
 
+          - Centers the actual highlighted match after result jumps, including rendered tables.
           - More reliable result jumps in Source, Live Preview, and Reading mode.
           - Re-runs search state when toggling between Source and Live Preview.
-          - Includes the 0.4 grouped-result controls, remembered options, and whole-word matching.
           EOF
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" \

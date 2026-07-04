@@ -289,6 +289,53 @@ function viewportCenterY(scroller) {
   }
 }
 
+function scrollRangeIntoView(range) {
+  try {
+    if (!range || !range.startContainer) return false;
+    const node = range.startContainer;
+    const el =
+      node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    if (!el || typeof el.scrollIntoView !== "function") return false;
+    const target =
+      (el.closest &&
+        el.closest(
+          ".cm-line, td, th, tr, p, li, h1, h2, h3, h4, h5, h6, dd, dt, blockquote"
+        )) ||
+      el;
+    target.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+    return true;
+  } catch (e) {
+    debugWarn("scrollRangeIntoView", e);
+    return false;
+  }
+}
+
+function centerEditorOffset(view, editor, off) {
+  try {
+    const cm = getEditorView(editor);
+    const scroller = getScroller(view) || (cm && cm.scrollDOM);
+    if (
+      !cm ||
+      typeof cm.coordsAtPos !== "function" ||
+      !scroller ||
+      off == null
+    )
+      return false;
+    const coords = cm.coordsAtPos(off);
+    if (!coords) return false;
+    const rect = scroller.getBoundingClientRect();
+    const targetY = rect.top + rect.height / 2;
+    const currentY = (coords.top + coords.bottom) / 2;
+    const delta = currentY - targetY;
+    if (!Number.isFinite(delta)) return false;
+    scroller.scrollTop += delta;
+    return true;
+  } catch (e) {
+    debugWarn("centerEditorOffset", e);
+    return false;
+  }
+}
+
 /**
  * Keep the rendered yellow highlights centered around the current orange match.
  * The search count/list still comes from the full note source; this only limits
@@ -1370,11 +1417,11 @@ class FindBar {
   }
 
   refreshHighlights(token = this.highlightToken) {
-    if (token !== this.highlightToken) return;
-    if (!this.barEl) return; // bail if a late timer fires after close()
-    if (!(window.CSS && CSS.highlights && window.Highlight)) return;
+    if (token !== this.highlightToken) return null;
+    if (!this.barEl) return null; // bail if a late timer fires after close()
+    if (!(window.CSS && CSS.highlights && window.Highlight)) return null;
     if (!this.query || !this.matcher || this.matcher.invalid)
-      return this.clearHighlights();
+      return this.clearHighlights(), null;
 
     // Reading mode: list/count/nav come from the source (complete). The current
     // match is mapped to the rendered DOM by content (exact, even with duplicate
@@ -1421,7 +1468,7 @@ class FindBar {
         scroller
       );
       this.domApply(dom, cur);
-      return;
+      return cur;
     }
 
     const root = getRenderRoot(this.view);
@@ -1474,6 +1521,7 @@ class FindBar {
     }
 
     if (!dom) dom = findRenderedMatches(root, this.matcher);
+    this.currentDomRange = currentRange;
     dom = limitDomHighlightsAroundCurrent(
       dom,
       currentRange,
@@ -1481,6 +1529,24 @@ class FindBar {
       scroller
     );
     this.domApply(dom, currentRange);
+    return currentRange;
+  }
+
+  revealCurrentMatch(token = this.highlightToken) {
+    const range = this.refreshHighlights(token);
+    if (range && scrollRangeIntoView(range)) return;
+
+    const m = this.matches[this.current];
+    if (!m || this.domMode) return;
+    try {
+      centerEditorOffset(
+        this.view,
+        this.editor,
+        this.editor.posToOffset({ line: m.line, ch: m.ch })
+      );
+    } catch (e) {
+      debugWarn("reveal current fallback", e);
+    }
   }
 
   search(query, options = {}) {
@@ -1559,9 +1625,9 @@ class FindBar {
         debugWarn("applyScroll", e);
       }
       this.currentDomRange = null; // recompute fresh for the new selection
-      this.refreshHighlights(token);
-      setTimeout(() => this.refreshHighlights(token), 90);
-      setTimeout(() => this.refreshHighlights(token), 220);
+      this.revealCurrentMatch(token);
+      setTimeout(() => this.revealCurrentMatch(token), 90);
+      setTimeout(() => this.revealCurrentMatch(token), 220);
       return;
     }
     const from = { line: m.line, ch: m.ch };
@@ -1603,8 +1669,10 @@ class FindBar {
     } catch (e) {
       debugWarn("scrollIntoView", e);
     }
-    this.refreshHighlights(token);
-    setTimeout(() => this.refreshHighlights(token), 60);
+    this.currentDomRange = null;
+    this.revealCurrentMatch(token);
+    setTimeout(() => this.revealCurrentMatch(token), 60);
+    setTimeout(() => this.revealCurrentMatch(token), 180);
   }
 
   updateCount() {
