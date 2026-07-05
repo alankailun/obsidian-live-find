@@ -23,6 +23,10 @@ rendered text (tables included).
   and the active heading count shows the match's position within that group.
 - **Match case** (`Aa`), **regular expression** (`.*`), and smarter
   **whole word** (`W`) toggles. Toggle choices are remembered.
+- **Jump to nearest** (crosshair toggle) — a fresh search jumps to the match
+  closest to your current scroll position instead of yanking you to the first
+  match in the note. Turn it off to always jump to the first match. Remembered
+  like the other toggles.
 - **Chrome-like plain searches** ignore leading/trailing spaces, and pasted
   search text is trimmed automatically.
 - **Prefill from selection** — select a word, trigger the command, and it's

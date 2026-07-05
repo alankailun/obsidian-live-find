@@ -24,6 +24,7 @@ const DEFAULT_FIND_OPTIONS = {
   groupResults: false,
   headingGroupLevel: 2,
   showResultHeadings: true,
+  jumpNearest: true,
 };
 
 function normalizeHeadingGroupLevel(value) {
@@ -65,6 +66,10 @@ function normalizeFindOptions(options) {
       typeof src.showResultHeadings === "boolean"
         ? src.showResultHeadings
         : DEFAULT_FIND_OPTIONS.showResultHeadings,
+    jumpNearest:
+      typeof src.jumpNearest === "boolean"
+        ? src.jumpNearest
+        : DEFAULT_FIND_OPTIONS.jumpNearest,
   };
 }
 
@@ -1057,6 +1062,7 @@ class FindBar {
     this.groupResults = options.groupResults;
     this.headingGroupLevel = options.headingGroupLevel;
     this.showResultHeadings = options.showResultHeadings;
+    this.jumpNearest = options.jumpNearest;
     this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
     this.renderedTextMode = false; // reading/live preview hide some Markdown syntax
     this.currentDomRange = null; // anchored current range in reading mode
@@ -1122,10 +1128,64 @@ class FindBar {
     return bestIndex;
   }
 
+  /**
+   * Best-effort source line currently at the center of the viewport. Used to
+   * start a fresh search near what the user is reading instead of always
+   * yanking to the first match in the note. Returns null if it can't be
+   * determined (callers then fall back to the first match).
+   */
+  anchorLineFromViewport() {
+    try {
+      // Reading mode: the preview renderer reports scroll as a (fractional)
+      // source-line number, symmetric with applyScroll(line).
+      if (this.view.getMode() === "preview") {
+        const pm = this.view.previewMode || this.view.currentMode;
+        const renderer = pm && pm.renderer;
+        let s = null;
+        if (renderer && typeof renderer.getScroll === "function") s = renderer.getScroll();
+        else if (pm && typeof pm.getScroll === "function") s = pm.getScroll();
+        return Number.isFinite(s) ? Math.max(0, Math.round(s)) : null;
+      }
+
+      // Editor (source / live preview): map the viewport center to a line.
+      const cm = getEditorView(this.editor);
+      const scroller = getScroller(this.view) || (cm && cm.scrollDOM);
+      if (!cm || !scroller || typeof cm.posAtCoords !== "function") return null;
+      const rect = scroller.getBoundingClientRect();
+      const y = rect.top + rect.height / 2;
+      const x = rect.left + Math.min(40, rect.width / 2);
+      let off = cm.posAtCoords({ x, y }, false);
+      if (off == null) off = cm.posAtCoords({ x, y });
+      if (off == null) return null;
+      const pos = this.editor.offsetToPos(off);
+      return pos ? pos.line : null;
+    } catch (e) {
+      debugWarn("anchorLineFromViewport", e);
+      return null;
+    }
+  }
+
+  /** Index of the match whose source line is nearest `line`; 0 if unknown. */
+  nearestMatchIndexToLine(line) {
+    if (line == null || !this.matches.length) return 0;
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < this.matches.length; i++) {
+      const m = this.matches[i];
+      const dist = Math.abs(m.line - line) * 100000 + m.ch;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    }
+    return best;
+  }
+
   syncToggleButtons() {
     if (this.caseBtn) this.caseBtn.toggleClass("is-on", this.caseSensitive);
     if (this.regexBtn) this.regexBtn.toggleClass("is-on", this.useRegex);
     if (this.wordBtn) this.wordBtn.toggleClass("is-on", this.wholeWord);
+    if (this.nearestBtn) this.nearestBtn.toggleClass("is-on", this.jumpNearest);
     if (this.groupBtn) {
       this.groupBtn.toggleClass("is-on", this.groupResults);
       this.groupBtn.setText(
@@ -1146,6 +1206,7 @@ class FindBar {
         groupResults: this.groupResults,
         headingGroupLevel: this.headingGroupLevel,
         showResultHeadings: this.showResultHeadings,
+        jumpNearest: this.jumpNearest,
       });
     }
   }
@@ -1230,6 +1291,10 @@ class FindBar {
     this.regexBtn.title = "Use regular expression";
     this.wordBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "W" });
     this.wordBtn.title = "Match whole word";
+    this.nearestBtn = bar.createEl("button", { cls: "lf-btn lf-toggle" });
+    setIcon(this.nearestBtn, "locate-fixed");
+    this.nearestBtn.title =
+      "Jump to the match nearest the current view (off: always jump to the first match)";
     this.groupBtn = bar.createEl("button", { cls: "lf-btn lf-toggle lf-heading-toggle", text: "H-" });
     this.groupBtn.title = "Group results by heading";
     this.syncToggleButtons();
@@ -1257,6 +1322,9 @@ class FindBar {
     };
     this.wordBtn.onclick = () => {
       this.setSearchOption("wholeWord", !this.wholeWord);
+    };
+    this.nearestBtn.onclick = () => {
+      this.setSearchOption("jumpNearest", !this.jumpNearest);
     };
     this.groupBtn.onclick = (evt) => this.showHeadingGroupMenu(evt);
 
@@ -1586,7 +1654,9 @@ class FindBar {
     this.current = this.matches.length
       ? options.preserveCurrent
         ? this.closestMatchIndex(previousMatch, previousCurrent)
-        : 0
+        : this.jumpNearest
+          ? this.nearestMatchIndexToLine(this.anchorLineFromViewport())
+          : 0
       : -1;
     this.currentDomRange = null;
     this.renderList();
