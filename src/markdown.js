@@ -117,30 +117,43 @@ export function parseHeading(line, lineIdx) {
 }
 
 /**
- * One O(lines) pass: for every line and heading level, the nearest Markdown
- * heading (of that level or above) at or before that line. lookup[level][line]
- * replaces the per-call upward scan in nearestHeading.
+ * One O(lines) pass: build heading anchors per grouping depth. lookup[N]
+ * contains only headings whose level is <= N, so binary search answers the
+ * nearest valid heading without keeping a full line-by-line table.
  */
 export function buildHeadingLookup(lines) {
-  const parsed = new Array(lines.length);
-  for (let i = 0; i < lines.length; i++) parsed[i] = parseHeading(lines[i], i);
-  const byLevel = [];
-  for (let level = 1; level <= 6; level++) {
-    const arr = new Array(lines.length);
-    let current = null;
-    for (let i = 0; i < lines.length; i++) {
-      const h = parsed[i];
-      if (h && h.level <= level) current = h;
-      arr[i] = current;
+  const byLevel = Array.from({ length: 7 }, () => []);
+  for (let i = 0; i < lines.length; i++) {
+    const heading = parseHeading(lines[i], i);
+    if (!heading) continue;
+    for (let level = heading.level; level <= 6; level++) {
+      byLevel[level].push(heading);
     }
-    byLevel[level] = arr;
   }
   return byLevel;
 }
 
+export function findHeadingForLine(headings, lineIdx) {
+  if (!headings || !headings.length || !Number.isFinite(lineIdx)) return null;
+  let lo = 0;
+  let hi = headings.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (headings[mid].line <= lineIdx) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best >= 0 ? headings[best] : null;
+}
+
 /** Walk up source lines to find the nearest Markdown heading above `lineIdx`. */
 export function nearestHeading(lines, lineIdx, maxLevel = 6, lookup) {
-  if (lookup && lookup[maxLevel]) return lookup[maxLevel][lineIdx] || null;
+  if (lookup && lookup[maxLevel])
+    return findHeadingForLine(lookup[maxLevel], lineIdx);
   for (let i = lineIdx; i >= 0; i--) {
     const heading = parseHeading(lines[i], i);
     if (heading && heading.level <= maxLevel) return heading;

@@ -226,14 +226,14 @@ export function tableFromPoint(cm, off) {
   }
 }
 
-export function resolveTableByPoint(cm, off, lines, m, matcher) {
+export function resolveTableByPoint(cm, off, lines, m, matcher, tableLookup = null) {
   try {
     const tableEl = tableFromDomAtPos(cm, off) || tableFromPoint(cm, off);
     if (!tableEl) return null;
 
     const info = cellInfoForMatch(lines[m.line], m.ch, matcher);
     if (!info || info.col < 0) return null;
-    const loc = locateInTables(lines, m.line);
+    const loc = locateInTables(lines, m.line, tableLookup);
     if (!loc || loc.kind === "delim") return null;
 
     let rowEl = null;
@@ -259,13 +259,29 @@ export function resolveTableByPoint(cm, off, lines, m, matcher) {
  * (each Chinese character is its own word).
  */
 
-export function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
+function cachedHiddenSpansForLine(lineIdx, line, hiddenSpansByLine = null) {
+  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
+    return hiddenSpansInReading(line);
+  if (!hiddenSpansByLine.has(lineIdx)) {
+    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
+  }
+  return hiddenSpansByLine.get(lineIdx) || [];
+}
+
+export function resolveReadingCurrentRange(
+  root,
+  lines,
+  m,
+  matcher,
+  scroller,
+  hiddenSpansByLine = null
+) {
   try {
     if (!root) return null;
     const line = lines[m.line] || "";
     // Count only matches that are visible in Reading mode, so the k-th match in
     // the source line aligns with the k-th visible match in the DOM.
-    const spans = hiddenSpansInReading(line);
+    const spans = cachedHiddenSpansForLine(m.line, line, hiddenSpansByLine);
     let kInLine = 0;
     for (const mt of findAll(line.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;

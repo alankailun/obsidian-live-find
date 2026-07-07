@@ -44,6 +44,15 @@ export function appendHighlightedSnippet(container, source, hitIdx, hitLen, keep
   if (e < source.length) container.appendText("…");
 }
 
+export function cachedHiddenSpans(lineIdx, lineText, hiddenSpansByLine = null) {
+  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
+    return hiddenSpansInReading(lineText);
+  if (!hiddenSpansByLine.has(lineIdx)) {
+    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(lineText));
+  }
+  return hiddenSpansByLine.get(lineIdx) || [];
+}
+
 export function normalizeSnippetPart(text) {
   return visibleInlineText(text).replace(/\s+/g, " ").trim();
 }
@@ -157,7 +166,7 @@ export function buildTableSnippetData(m, lines, matcher, tableLookup) {
   return { source, hitIdx, hitLen, keepShort: true };
 }
 
-export function buildLineSnippetData(m, matcher, domMode) {
+export function buildLineSnippetData(m, matcher, domMode, hiddenSpansByLine = null) {
   const source = domMode ? cleanSnippet(m.lineText) : m.lineText;
   if (!source) return null;
 
@@ -166,7 +175,7 @@ export function buildLineSnippetData(m, matcher, domMode) {
   if (domMode) {
     // Count matches before this one within the same source line, skipping hidden
     // Markdown spans, then select the same occurrence in the visible text.
-    const spans = hiddenSpansInReading(m.lineText);
+    const spans = cachedHiddenSpans(m.line, m.lineText, hiddenSpansByLine);
     let kInLine = 0;
     for (const mt of findAll(m.lineText.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;
@@ -184,10 +193,17 @@ export function buildLineSnippetData(m, matcher, domMode) {
   return { source, hitIdx, hitLen, keepShort: false };
 }
 
-export function buildSnippetData(m, lines, matcher, domMode, tableLookup) {
+export function buildSnippetData(
+  m,
+  lines,
+  matcher,
+  domMode,
+  tableLookup,
+  hiddenSpansByLine = null
+) {
   return (
     buildTableSnippetData(m, lines, matcher, tableLookup) ||
-    buildLineSnippetData(m, matcher, domMode)
+    buildLineSnippetData(m, matcher, domMode, hiddenSpansByLine)
   );
 }
 

@@ -33,12 +33,96 @@ export class FindBar {
     this.highlightToken = 0;
     this.highlightRegistry = null;
     this.resultList = null;
+    this.docCache = null;
+    this.perfStats = {};
+    this.perfSeq = 0;
     this.barEl = null;
     this.resultsEl = null;
   }
 
   get editor() {
     return this.view && this.view.editor;
+  }
+
+  performanceApi() {
+    const win = getElementWindow(
+      this.barEl || (this.view && this.view.containerEl)
+    );
+    return win && win.performance ? win.performance : null;
+  }
+
+  beginPerf(name) {
+    const perf = this.performanceApi();
+    const id = ++this.perfSeq;
+    const start = perf ? perf.now() : Date.now();
+    const markName = `live-find:${name}:start:${id}`;
+    if (perf && typeof perf.mark === "function") {
+      try {
+        perf.mark(markName);
+      } catch (e) {
+        debugWarn("perf mark", e);
+      }
+    }
+    return { name, id, start, markName, perf };
+  }
+
+  endPerf(mark) {
+    if (!mark) return 0;
+    const perf = mark.perf || this.performanceApi();
+    const end = perf ? perf.now() : Date.now();
+    const duration = end - mark.start;
+    this.perfStats[mark.name] = duration;
+    if (perf && typeof perf.mark === "function" && typeof perf.measure === "function") {
+      const endMark = `live-find:${mark.name}:end:${mark.id}`;
+      const measureName = `live-find:${mark.name}`;
+      try {
+        perf.mark(endMark);
+        perf.measure(measureName, mark.markName, endMark);
+        if (typeof perf.clearMarks === "function") {
+          perf.clearMarks(mark.markName);
+          perf.clearMarks(endMark);
+        }
+      } catch (e) {
+        debugWarn("perf measure", e);
+      }
+    }
+    return duration;
+  }
+
+  updateDocumentCache() {
+    const text = this.editor.getValue();
+    if (this.docCache && this.docCache.text === text) {
+      this.docLines = this.docCache.lines;
+      this.tableLookup = this.docCache.tables;
+      this.headingLookup = this.docCache.headings;
+      return this.docCache;
+    }
+
+    const lines = text.split("\n");
+    const cache = {
+      text,
+      lines,
+      lowerLines: lines.map((line) => line.toLowerCase()),
+      tables: buildTableLookup(lines),
+      headings: buildHeadingLookup(lines),
+      hiddenSpansByLine: new Map(),
+      version: this.docCache ? this.docCache.version + 1 : 1,
+    };
+    this.docCache = cache;
+    this.docLines = cache.lines;
+    this.tableLookup = cache.tables;
+    this.headingLookup = cache.headings;
+    return cache;
+  }
+
+  hiddenSpansForLine(lineIdx) {
+    const cache = this.docCache;
+    const line = cache && cache.lines ? cache.lines[lineIdx] || "" : "";
+    if (!cache) return hiddenSpansInReading(line);
+    if (!cache.hiddenSpansByLine.has(lineIdx)) {
+      cache.hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
+    }
+    return cache.hiddenSpansByLine.get(lineIdx) || [];
   }
 
   isOpen() {
@@ -446,6 +530,7 @@ export class FindBar {
     this.matcher = null;
     this.tableLookup = null;
     this.headingLookup = null;
+    this.docCache = null;
     this.snippetCache = new Map();
   }
 
@@ -477,7 +562,14 @@ export class FindBar {
       const m = this.matches[this.current];
       const scroller = getScroller(this.view);
       let cur = m
-        ? resolveReadingCurrentRange(root, this.docLines, m, this.matcher, scroller)
+        ? resolveReadingCurrentRange(
+            root,
+            this.docLines,
+            m,
+            this.matcher,
+            scroller,
+            this.docCache && this.docCache.hiddenSpansByLine
+          )
         : null;
       if (
         !cur &&
@@ -541,7 +633,14 @@ export class FindBar {
 
       if (off != null && cm) {
         if (isTable)
-          currentRange = resolveTableByPoint(cm, off, lines, m, this.matcher);
+          currentRange = resolveTableByPoint(
+            cm,
+            off,
+            lines,
+            m,
+            this.matcher,
+            this.tableLookup
+          );
         if (!currentRange) currentRange = resolveByDomAtPos(cm, off, this.matcher);
         if (!currentRange) {
           const domOptions = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3000 } : {};
@@ -605,6 +704,7 @@ export class FindBar {
   search(query, options = {}) {
     if (!this.barEl || !this.resultsEl) return;
 
+    const totalPerf = this.beginPerf("search-total");
     const previousCurrent = this.current;
     const previousMatch = options.preserveCurrent ? this.matches[previousCurrent] : null;
     const shouldJump = options.jump !== false;
@@ -615,30 +715,31 @@ export class FindBar {
     this.domMode = this.view.getMode() === "preview";
     this.renderedTextMode = this.domMode || isLivePreviewMode(this.view);
     // Both modes: complete whole-note search from the source.
-    const text = this.editor.getValue();
-    this.docLines = text.split("\n");
-    // One O(lines) pass each; makes every per-row snippet/heading lookup O(1).
-    this.tableLookup = buildTableLookup(this.docLines);
-    this.headingLookup = buildHeadingLookup(this.docLines);
+    const cachePerf = this.beginPerf("document-cache");
+    const docCache = this.updateDocumentCache();
+    this.endPerf(cachePerf);
     this.snippetCache = new Map();
-    this.matches = findSourceMatches(this.docLines, this.matcher);
+    const matchPerf = this.beginPerf("match-source");
+    this.matches = findSourceMatches(
+      docCache.lines,
+      this.matcher,
+      docCache.lowerLines
+    );
+    this.endPerf(matchPerf);
     this.matchGroupInfo = null;
     // Rendered modes hide some Markdown source syntax. Drop matches inside
     // those hidden ranges so jump/search defaults land on visible text.
     if (this.renderedTextMode && this.matches.length) {
-      const cache = new Map();
+      const filterPerf = this.beginPerf("filter-rendered");
       this.matches = this.matches.filter((m) => {
         const line = this.docLines[m.line] || "";
         if (isDelimiterRow(line)) return false;
         if (!cleanSnippet(line)) return false;
 
-        let spans = cache.get(m.line);
-        if (!spans) {
-          spans = hiddenSpansInReading(line);
-          cache.set(m.line, spans);
-        }
+        const spans = this.hiddenSpansForLine(m.line);
         return !isInsideSpan(m.ch, spans);
       });
+      this.endPerf(filterPerf);
     }
     this.current = this.matches.length
       ? options.preserveCurrent
@@ -648,12 +749,15 @@ export class FindBar {
           : 0
       : -1;
     this.currentDomRange = null;
+    const renderPerf = this.beginPerf("render-results");
     this.renderList();
     this.updateCount();
+    this.endPerf(renderPerf);
     const token = this.nextHighlightToken();
     if (this.current >= 0 && shouldJump) this.jumpToCurrent(token);
     else if (this.current >= 0) this.refreshHighlights(token);
     else this.clearHighlights();
+    this.endPerf(totalPerf);
   }
 
   step(dir) {
@@ -856,7 +960,8 @@ export class FindBar {
         this.docLines || [],
         this.matcher,
         this.renderedTextMode,
-        this.tableLookup
+        this.tableLookup,
+        this.docCache && this.docCache.hiddenSpansByLine
       );
       this.snippetCache.set(i, snippet || null);
     }

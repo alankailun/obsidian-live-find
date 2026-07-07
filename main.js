@@ -195,12 +195,27 @@ function findAll(text, matcher) {
   }
   return out;
 }
-function findSourceMatches(lines, matcher) {
+function findPlainMatchesInHaystack(text, hay, matcher) {
+  const out = [];
+  const n = matcher.needle;
+  let from = 0;
+  while (true) {
+    const i = hay.indexOf(n, from);
+    if (i === -1) break;
+    if (!matcher.wholeWord || isWholeWordMatch(text, i, n.length, matcher))
+      out.push({ index: i, length: n.length });
+    from = i + n.length;
+  }
+  return out;
+}
+function findSourceMatches(lines, matcher, lowerLines = null) {
   const res = [];
   if (!matcher || matcher.invalid) return res;
+  const useLowerCache = !!lowerLines && !matcher.regex && !matcher.caseSensitive;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    for (const mt of findAll(line, matcher)) {
+    const found = useLowerCache ? findPlainMatchesInHaystack(line, lowerLines[i] || "", matcher) : findAll(line, matcher);
+    for (const mt of found) {
       res.push({ line: i, ch: mt.index, len: mt.length, lineText: line });
     }
   }
@@ -238,7 +253,7 @@ function parseCells(line) {
   return cells;
 }
 function buildTableLookup(lines) {
-  const lookup = new Array(lines.length).fill(null);
+  const ranges = [];
   let tableIdx = -1;
   let i = 0;
   while (i < lines.length) {
@@ -258,16 +273,40 @@ function buildTableLookup(lines) {
     }
     if (delimLine !== -1) {
       tableIdx++;
-      const block = { tableIdx, blockStart, blockEnd: j, delimLine };
-      for (let k = blockStart; k < j; k++) lookup[k] = block;
+      ranges.push({
+        tableIdx,
+        blockStart,
+        blockEnd: j,
+        startLine: blockStart,
+        endLine: j - 1,
+        headerLine: blockStart,
+        delimLine
+      });
     }
     i = j;
   }
-  return lookup;
+  return ranges;
+}
+function findTableForLine(ranges, lineIdx) {
+  if (!ranges || !ranges.length || !Number.isFinite(lineIdx)) return null;
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = lo + hi >> 1;
+    const block = ranges[mid];
+    if (lineIdx < block.startLine) {
+      hi = mid - 1;
+    } else if (lineIdx > block.endLine) {
+      lo = mid + 1;
+    } else {
+      return block;
+    }
+  }
+  return null;
 }
 function locateInTables(lines, lineIdx, lookup) {
   if (lookup) {
-    const block = lookup[lineIdx];
+    const block = findTableForLine(lookup, lineIdx);
     if (!block) return null;
     if (lineIdx === block.blockStart)
       return { tableIdx: block.tableIdx, kind: "header" };
@@ -348,12 +387,12 @@ function tableDataCells(line) {
 }
 function tableBlockForLine(lines, lineIdx, lookup) {
   if (lookup) {
-    const block = lookup[lineIdx];
+    const block = findTableForLine(lookup, lineIdx);
     if (!block) return null;
     return {
       blockStart: block.blockStart,
       blockEnd: block.blockEnd,
-      headerLine: block.blockStart,
+      headerLine: block.headerLine,
       delimLine: block.delimLine
     };
   }
@@ -457,23 +496,35 @@ function parseHeading(line, lineIdx) {
   return { level: m[1].length, text: m[2], line: lineIdx };
 }
 function buildHeadingLookup(lines) {
-  const parsed = new Array(lines.length);
-  for (let i = 0; i < lines.length; i++) parsed[i] = parseHeading(lines[i], i);
-  const byLevel = [];
-  for (let level = 1; level <= 6; level++) {
-    const arr = new Array(lines.length);
-    let current = null;
-    for (let i = 0; i < lines.length; i++) {
-      const h = parsed[i];
-      if (h && h.level <= level) current = h;
-      arr[i] = current;
+  const byLevel = Array.from({ length: 7 }, () => []);
+  for (let i = 0; i < lines.length; i++) {
+    const heading = parseHeading(lines[i], i);
+    if (!heading) continue;
+    for (let level = heading.level; level <= 6; level++) {
+      byLevel[level].push(heading);
     }
-    byLevel[level] = arr;
   }
   return byLevel;
 }
+function findHeadingForLine(headings, lineIdx) {
+  if (!headings || !headings.length || !Number.isFinite(lineIdx)) return null;
+  let lo = 0;
+  let hi = headings.length - 1;
+  let best = -1;
+  while (lo <= hi) {
+    const mid = lo + hi >> 1;
+    if (headings[mid].line <= lineIdx) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best >= 0 ? headings[best] : null;
+}
 function nearestHeading(lines, lineIdx, maxLevel = 6, lookup) {
-  if (lookup && lookup[maxLevel]) return lookup[maxLevel][lineIdx] || null;
+  if (lookup && lookup[maxLevel])
+    return findHeadingForLine(lookup[maxLevel], lineIdx);
   for (let i = lineIdx; i >= 0; i--) {
     const heading = parseHeading(lines[i], i);
     if (heading && heading.level <= maxLevel) return heading;
@@ -533,6 +584,14 @@ function appendHighlightedSnippet(container, source, hitIdx, hitLen, keepShort =
   container.createEl("strong", { text: win.slice(ls, le) });
   if (le < win.length) container.appendText(win.slice(le));
   if (e < source.length) container.appendText("\u2026");
+}
+function cachedHiddenSpans(lineIdx, lineText, hiddenSpansByLine = null) {
+  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
+    return hiddenSpansInReading(lineText);
+  if (!hiddenSpansByLine.has(lineIdx)) {
+    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(lineText));
+  }
+  return hiddenSpansByLine.get(lineIdx) || [];
 }
 function normalizeSnippetPart(text) {
   return visibleInlineText(text).replace(/\s+/g, " ").trim();
@@ -616,13 +675,13 @@ function buildTableSnippetData(m, lines, matcher, tableLookup) {
   if (hitIdx < 0) return null;
   return { source, hitIdx, hitLen, keepShort: true };
 }
-function buildLineSnippetData(m, matcher, domMode) {
+function buildLineSnippetData(m, matcher, domMode, hiddenSpansByLine = null) {
   const source = domMode ? cleanSnippet(m.lineText) : m.lineText;
   if (!source) return null;
   let hitIdx;
   let hitLen;
   if (domMode) {
-    const spans = hiddenSpansInReading(m.lineText);
+    const spans = cachedHiddenSpans(m.line, m.lineText, hiddenSpansByLine);
     let kInLine = 0;
     for (const mt of findAll(m.lineText.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;
@@ -638,8 +697,8 @@ function buildLineSnippetData(m, matcher, domMode) {
   }
   return { source, hitIdx, hitLen, keepShort: false };
 }
-function buildSnippetData(m, lines, matcher, domMode, tableLookup) {
-  return buildTableSnippetData(m, lines, matcher, tableLookup) || buildLineSnippetData(m, matcher, domMode);
+function buildSnippetData(m, lines, matcher, domMode, tableLookup, hiddenSpansByLine = null) {
+  return buildTableSnippetData(m, lines, matcher, tableLookup) || buildLineSnippetData(m, matcher, domMode, hiddenSpansByLine);
 }
 
 // src/dom-resolve.js
@@ -840,13 +899,13 @@ function tableFromPoint(cm, off) {
     return null;
   }
 }
-function resolveTableByPoint(cm, off, lines, m, matcher) {
+function resolveTableByPoint(cm, off, lines, m, matcher, tableLookup = null) {
   try {
     const tableEl = tableFromDomAtPos(cm, off) || tableFromPoint(cm, off);
     if (!tableEl) return null;
     const info = cellInfoForMatch(lines[m.line], m.ch, matcher);
     if (!info || info.col < 0) return null;
-    const loc = locateInTables(lines, m.line);
+    const loc = locateInTables(lines, m.line, tableLookup);
     if (!loc || loc.kind === "delim") return null;
     let rowEl = null;
     if (loc.kind === "header") {
@@ -863,11 +922,19 @@ function resolveTableByPoint(cm, off, lines, m, matcher) {
     return null;
   }
 }
-function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
+function cachedHiddenSpansForLine(lineIdx, line, hiddenSpansByLine = null) {
+  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
+    return hiddenSpansInReading(line);
+  if (!hiddenSpansByLine.has(lineIdx)) {
+    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
+  }
+  return hiddenSpansByLine.get(lineIdx) || [];
+}
+function resolveReadingCurrentRange(root, lines, m, matcher, scroller, hiddenSpansByLine = null) {
   try {
     if (!root) return null;
     const line = lines[m.line] || "";
-    const spans = hiddenSpansInReading(line);
+    const spans = cachedHiddenSpansForLine(m.line, line, hiddenSpansByLine);
     let kInLine = 0;
     for (const mt of findAll(line.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;
@@ -1348,11 +1415,89 @@ var FindBar = class {
     this.highlightToken = 0;
     this.highlightRegistry = null;
     this.resultList = null;
+    this.docCache = null;
+    this.perfStats = {};
+    this.perfSeq = 0;
     this.barEl = null;
     this.resultsEl = null;
   }
   get editor() {
     return this.view && this.view.editor;
+  }
+  performanceApi() {
+    const win = getElementWindow(
+      this.barEl || this.view && this.view.containerEl
+    );
+    return win && win.performance ? win.performance : null;
+  }
+  beginPerf(name) {
+    const perf = this.performanceApi();
+    const id = ++this.perfSeq;
+    const start = perf ? perf.now() : Date.now();
+    const markName = `live-find:${name}:start:${id}`;
+    if (perf && typeof perf.mark === "function") {
+      try {
+        perf.mark(markName);
+      } catch (e) {
+        debugWarn("perf mark", e);
+      }
+    }
+    return { name, id, start, markName, perf };
+  }
+  endPerf(mark) {
+    if (!mark) return 0;
+    const perf = mark.perf || this.performanceApi();
+    const end = perf ? perf.now() : Date.now();
+    const duration = end - mark.start;
+    this.perfStats[mark.name] = duration;
+    if (perf && typeof perf.mark === "function" && typeof perf.measure === "function") {
+      const endMark = `live-find:${mark.name}:end:${mark.id}`;
+      const measureName = `live-find:${mark.name}`;
+      try {
+        perf.mark(endMark);
+        perf.measure(measureName, mark.markName, endMark);
+        if (typeof perf.clearMarks === "function") {
+          perf.clearMarks(mark.markName);
+          perf.clearMarks(endMark);
+        }
+      } catch (e) {
+        debugWarn("perf measure", e);
+      }
+    }
+    return duration;
+  }
+  updateDocumentCache() {
+    const text = this.editor.getValue();
+    if (this.docCache && this.docCache.text === text) {
+      this.docLines = this.docCache.lines;
+      this.tableLookup = this.docCache.tables;
+      this.headingLookup = this.docCache.headings;
+      return this.docCache;
+    }
+    const lines = text.split("\n");
+    const cache = {
+      text,
+      lines,
+      lowerLines: lines.map((line) => line.toLowerCase()),
+      tables: buildTableLookup(lines),
+      headings: buildHeadingLookup(lines),
+      hiddenSpansByLine: /* @__PURE__ */ new Map(),
+      version: this.docCache ? this.docCache.version + 1 : 1
+    };
+    this.docCache = cache;
+    this.docLines = cache.lines;
+    this.tableLookup = cache.tables;
+    this.headingLookup = cache.headings;
+    return cache;
+  }
+  hiddenSpansForLine(lineIdx) {
+    const cache = this.docCache;
+    const line = cache && cache.lines ? cache.lines[lineIdx] || "" : "";
+    if (!cache) return hiddenSpansInReading(line);
+    if (!cache.hiddenSpansByLine.has(lineIdx)) {
+      cache.hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
+    }
+    return cache.hiddenSpansByLine.get(lineIdx) || [];
   }
   isOpen() {
     return !!this.barEl;
@@ -1702,6 +1847,7 @@ var FindBar = class {
     this.matcher = null;
     this.tableLookup = null;
     this.headingLookup = null;
+    this.docCache = null;
     this.snippetCache = /* @__PURE__ */ new Map();
   }
   clearHighlights() {
@@ -1723,7 +1869,14 @@ var FindBar = class {
       const root2 = getRenderRoot(this.view);
       const m2 = this.matches[this.current];
       const scroller2 = getScroller(this.view);
-      let cur = m2 ? resolveReadingCurrentRange(root2, this.docLines, m2, this.matcher, scroller2) : null;
+      let cur = m2 ? resolveReadingCurrentRange(
+        root2,
+        this.docLines,
+        m2,
+        this.matcher,
+        scroller2,
+        this.docCache && this.docCache.hiddenSpansByLine
+      ) : null;
       if (!cur && this.currentDomRange && this.currentDomRange.startContainer && this.currentDomRange.startContainer.isConnected)
         cur = this.currentDomRange;
       const domOptions2 = fromScroll || options.viewportOnly ? { scroller: scroller2, viewportMargin: 3e3 } : {};
@@ -1771,7 +1924,14 @@ var FindBar = class {
       }
       if (off != null && cm) {
         if (isTable)
-          currentRange = resolveTableByPoint(cm, off, lines, m, this.matcher);
+          currentRange = resolveTableByPoint(
+            cm,
+            off,
+            lines,
+            m,
+            this.matcher,
+            this.tableLookup
+          );
         if (!currentRange) currentRange = resolveByDomAtPos(cm, off, this.matcher);
         if (!currentRange) {
           const domOptions2 = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3e3 } : {};
@@ -1829,6 +1989,7 @@ var FindBar = class {
   }
   search(query, options = {}) {
     if (!this.barEl || !this.resultsEl) return;
+    const totalPerf = this.beginPerf("search-total");
     const previousCurrent = this.current;
     const previousMatch = options.preserveCurrent ? this.matches[previousCurrent] : null;
     const shouldJump = options.jump !== false;
@@ -1837,35 +1998,40 @@ var FindBar = class {
     this.matcher = buildMatcher(effectiveQuery, this.caseSensitive, this.useRegex, this.wholeWord);
     this.domMode = this.view.getMode() === "preview";
     this.renderedTextMode = this.domMode || isLivePreviewMode(this.view);
-    const text = this.editor.getValue();
-    this.docLines = text.split("\n");
-    this.tableLookup = buildTableLookup(this.docLines);
-    this.headingLookup = buildHeadingLookup(this.docLines);
+    const cachePerf = this.beginPerf("document-cache");
+    const docCache = this.updateDocumentCache();
+    this.endPerf(cachePerf);
     this.snippetCache = /* @__PURE__ */ new Map();
-    this.matches = findSourceMatches(this.docLines, this.matcher);
+    const matchPerf = this.beginPerf("match-source");
+    this.matches = findSourceMatches(
+      docCache.lines,
+      this.matcher,
+      docCache.lowerLines
+    );
+    this.endPerf(matchPerf);
     this.matchGroupInfo = null;
     if (this.renderedTextMode && this.matches.length) {
-      const cache = /* @__PURE__ */ new Map();
+      const filterPerf = this.beginPerf("filter-rendered");
       this.matches = this.matches.filter((m) => {
         const line = this.docLines[m.line] || "";
         if (isDelimiterRow(line)) return false;
         if (!cleanSnippet(line)) return false;
-        let spans = cache.get(m.line);
-        if (!spans) {
-          spans = hiddenSpansInReading(line);
-          cache.set(m.line, spans);
-        }
+        const spans = this.hiddenSpansForLine(m.line);
         return !isInsideSpan(m.ch, spans);
       });
+      this.endPerf(filterPerf);
     }
     this.current = this.matches.length ? options.preserveCurrent ? this.closestMatchIndex(previousMatch, previousCurrent) : this.jumpNearest ? this.nearestMatchIndexToLine(this.anchorLineFromViewport()) : 0 : -1;
     this.currentDomRange = null;
+    const renderPerf = this.beginPerf("render-results");
     this.renderList();
     this.updateCount();
+    this.endPerf(renderPerf);
     const token = this.nextHighlightToken();
     if (this.current >= 0 && shouldJump) this.jumpToCurrent(token);
     else if (this.current >= 0) this.refreshHighlights(token);
     else this.clearHighlights();
+    this.endPerf(totalPerf);
   }
   step(dir) {
     if (!this.matches.length) return;
@@ -2040,7 +2206,8 @@ var FindBar = class {
         this.docLines || [],
         this.matcher,
         this.renderedTextMode,
-        this.tableLookup
+        this.tableLookup,
+        this.docCache && this.docCache.hiddenSpansByLine
       );
       this.snippetCache.set(i, snippet || null);
     }

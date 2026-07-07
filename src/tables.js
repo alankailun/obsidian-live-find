@@ -33,13 +33,12 @@ export function parseCells(line) {
 }
 
 /**
- * One O(lines) pass over the note: for every line, which Markdown table block
- * (if any) contains it. Passing the result into locateInTables /
- * tableBlockForLine turns their per-call full-document scans into O(1)
- * lookups — the dominant cost when building thousands of result snippets.
+ * One O(lines) pass over the note: collect Markdown table ranges. Each range
+ * keeps the delimiter/header metadata that locating and snippets need; callers
+ * use binary search instead of rescanning the whole document for every row.
  */
 export function buildTableLookup(lines) {
-  const lookup = new Array(lines.length).fill(null);
+  const ranges = [];
   let tableIdx = -1;
   let i = 0;
   while (i < lines.length) {
@@ -62,17 +61,42 @@ export function buildTableLookup(lines) {
 
     if (delimLine !== -1) {
       tableIdx++;
-      const block = { tableIdx, blockStart, blockEnd: j, delimLine };
-      for (let k = blockStart; k < j; k++) lookup[k] = block;
+      ranges.push({
+        tableIdx,
+        blockStart,
+        blockEnd: j,
+        startLine: blockStart,
+        endLine: j - 1,
+        headerLine: blockStart,
+        delimLine,
+      });
     }
     i = j;
   }
-  return lookup;
+  return ranges;
+}
+
+export function findTableForLine(ranges, lineIdx) {
+  if (!ranges || !ranges.length || !Number.isFinite(lineIdx)) return null;
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const block = ranges[mid];
+    if (lineIdx < block.startLine) {
+      hi = mid - 1;
+    } else if (lineIdx > block.endLine) {
+      lo = mid + 1;
+    } else {
+      return block;
+    }
+  }
+  return null;
 }
 
 export function locateInTables(lines, lineIdx, lookup) {
   if (lookup) {
-    const block = lookup[lineIdx];
+    const block = findTableForLine(lookup, lineIdx);
     if (!block) return null;
     if (lineIdx === block.blockStart)
       return { tableIdx: block.tableIdx, kind: "header" };
@@ -164,12 +188,12 @@ export function tableDataCells(line) {
 
 export function tableBlockForLine(lines, lineIdx, lookup) {
   if (lookup) {
-    const block = lookup[lineIdx];
+    const block = findTableForLine(lookup, lineIdx);
     if (!block) return null;
     return {
       blockStart: block.blockStart,
       blockEnd: block.blockEnd,
-      headerLine: block.blockStart,
+      headerLine: block.headerLine,
       delimLine: block.delimLine,
     };
   }

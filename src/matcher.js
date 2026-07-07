@@ -105,13 +105,32 @@ export function findAll(text, matcher) {
   return out;
 }
 
+function findPlainMatchesInHaystack(text, hay, matcher) {
+  const out = [];
+  const n = matcher.needle;
+  let from = 0;
+  while (true) {
+    const i = hay.indexOf(n, from);
+    if (i === -1) break;
+    if (!matcher.wholeWord || isWholeWordMatch(text, i, n.length, matcher))
+      out.push({ index: i, length: n.length });
+    from = i + n.length;
+  }
+  return out;
+}
+
 /** Complete, viewport-independent search of the note SOURCE. */
-export function findSourceMatches(lines, matcher) {
+export function findSourceMatches(lines, matcher, lowerLines = null) {
   const res = [];
   if (!matcher || matcher.invalid) return res;
+  const useLowerCache =
+    !!lowerLines && !matcher.regex && !matcher.caseSensitive;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    for (const mt of findAll(line, matcher)) {
+    const found = useLowerCache
+      ? findPlainMatchesInHaystack(line, lowerLines[i] || "", matcher)
+      : findAll(line, matcher);
+    for (const mt of found) {
       res.push({ line: i, ch: mt.index, len: mt.length, lineText: line });
     }
   }
