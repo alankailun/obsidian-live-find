@@ -22,9 +22,9 @@ jobs:
           cat > release-notes.md <<EOF
           Live Find $TAG
 
-          - Centers the actual highlighted match after result jumps, including rendered tables.
-          - More reliable result jumps in Source, Live Preview, and Reading mode.
-          - Re-runs search state when toggling between Source and Live Preview.
+          - Preserves the current match when toggling between Source, Live Preview, and Reading mode.
+          - Fixes rendered highlights in Obsidian popout windows.
+          - Limits the result list to an initial batch with a Show more button for large match sets.
           EOF
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" \
