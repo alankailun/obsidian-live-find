@@ -477,6 +477,14 @@ function isInsideSpan(ch, spans) {
   for (const [a, b] of spans) if (ch >= a && ch < b) return true;
   return false;
 }
+function cachedHiddenSpans(lineIdx, line, hiddenSpansByLine = null) {
+  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
+    return hiddenSpansInReading(line);
+  if (!hiddenSpansByLine.has(lineIdx)) {
+    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
+  }
+  return hiddenSpansByLine.get(lineIdx) || [];
+}
 function parseHeading(line, lineIdx) {
   const m = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line || "");
   if (!m) return null;
@@ -571,14 +579,6 @@ function appendHighlightedSnippet(container, source, hitIdx, hitLen, keepShort =
   container.createEl("strong", { text: win.slice(ls, le) });
   if (le < win.length) container.appendText(win.slice(le));
   if (e < source.length) container.appendText("\u2026");
-}
-function cachedHiddenSpans(lineIdx, lineText, hiddenSpansByLine = null) {
-  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
-    return hiddenSpansInReading(lineText);
-  if (!hiddenSpansByLine.has(lineIdx)) {
-    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(lineText));
-  }
-  return hiddenSpansByLine.get(lineIdx) || [];
 }
 function normalizeSnippetPart(text) {
   return visibleInlineText(text).replace(/\s+/g, " ").trim();
@@ -909,19 +909,11 @@ function resolveTableByPoint(cm, off, lines, m, matcher, tableLookup = null) {
     return null;
   }
 }
-function cachedHiddenSpansForLine(lineIdx, line, hiddenSpansByLine = null) {
-  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
-    return hiddenSpansInReading(line);
-  if (!hiddenSpansByLine.has(lineIdx)) {
-    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
-  }
-  return hiddenSpansByLine.get(lineIdx) || [];
-}
 function resolveReadingCurrentRange(root, lines, m, matcher, scroller, hiddenSpansByLine = null) {
   try {
     if (!root) return null;
     const line = lines[m.line] || "";
-    const spans = cachedHiddenSpansForLine(m.line, line, hiddenSpansByLine);
+    const spans = cachedHiddenSpans(m.line, line, hiddenSpansByLine);
     let kInLine = 0;
     for (const mt of findAll(line.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;
@@ -2712,12 +2704,11 @@ var FindBar = class {
     this.highlightRegistry = null;
     this.resultList = null;
     this.docCache = null;
+    this.docDirty = true;
     this.perfStats = {};
     this.perfSeq = 0;
     this.renderObserver = null;
     this.observedRenderRoot = null;
-    this.mutationFrame = null;
-    this.mutationWindow = null;
     this.hlFrame = null;
     this.hlTrailingTimer = null;
     this.hlTrailingWindow = null;
@@ -2771,8 +2762,15 @@ var FindBar = class {
     return duration;
   }
   updateDocumentCache() {
+    if (this.docCache && !this.docDirty) {
+      this.docLines = this.docCache.lines;
+      this.tableLookup = this.docCache.tables;
+      this.headingLookup = this.docCache.headings;
+      return this.docCache;
+    }
     const text = this.editor.getValue();
     if (this.docCache && this.docCache.text === text) {
+      this.docDirty = false;
       this.docLines = this.docCache.lines;
       this.tableLookup = this.docCache.tables;
       this.headingLookup = this.docCache.headings;
@@ -2789,6 +2787,7 @@ var FindBar = class {
       version: this.docCache ? this.docCache.version + 1 : 1
     };
     this.docCache = cache;
+    this.docDirty = false;
     this.docLines = cache.lines;
     this.tableLookup = cache.tables;
     this.headingLookup = cache.headings;
@@ -2837,7 +2836,7 @@ var FindBar = class {
         return !(el && el.closest && el.closest(".lf-find-bar, .lf-results"));
       });
       if (!hasNoteMutation) return;
-      this.scheduleRenderedDomRefresh();
+      this.scheduleHighlightRefresh();
     });
     this.renderObserver.observe(root, {
       childList: true,
@@ -2849,32 +2848,6 @@ var FindBar = class {
     if (this.renderObserver) this.renderObserver.disconnect();
     this.renderObserver = null;
     this.observedRenderRoot = null;
-    this.cancelRenderedDomRefresh();
-  }
-  scheduleRenderedDomRefresh() {
-    if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
-      return;
-    if (this.mutationFrame != null) return;
-    const root = this.observedRenderRoot || getRenderRoot(this.view);
-    const win = root ? getElementWindow(root) : getElementWindow(this.barEl);
-    this.mutationWindow = win;
-    this.mutationFrame = win.requestAnimationFrame(() => {
-      this.mutationFrame = null;
-      this.mutationWindow = null;
-      this.refreshHighlights(this.highlightToken, {
-        fromScroll: true,
-        viewportOnly: true
-      });
-    });
-  }
-  cancelRenderedDomRefresh() {
-    if (this.mutationFrame == null) return;
-    const win = this.mutationWindow || (this.observedRenderRoot ? getElementWindow(this.observedRenderRoot) : null) || (this.barEl ? getElementWindow(this.barEl) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.mutationFrame);
-    }
-    this.mutationFrame = null;
-    this.mutationWindow = null;
   }
   scheduleHighlightRefresh() {
     if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
@@ -3182,12 +3155,18 @@ var FindBar = class {
       this.updateRenderObserver();
       this.refreshCurrentSearch({ preserveCurrent: true });
     });
-    this.onEditorChange = debounce(() => {
+    const refreshAfterEditorChange = debounce(() => {
+      if (!this.barEl) return;
+      this.refreshCurrentSearch({ preserveCurrent: true, jump: false });
+    }, DEBOUNCE_MS);
+    this.onEditorChange = () => {
       if (!this.barEl) return;
       const active = this.plugin.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
       if (active !== this.view) return;
-      this.refreshCurrentSearch({ preserveCurrent: true, jump: false });
-    }, DEBOUNCE_MS);
+      this.docDirty = true;
+      refreshAfterEditorChange();
+    };
+    this.onEditorChange.cancel = refreshAfterEditorChange.cancel;
     this.editorChangeEvt = this.plugin.app.workspace.on(
       "editor-change",
       this.onEditorChange
@@ -3252,6 +3231,7 @@ var FindBar = class {
     this.tableLookup = null;
     this.headingLookup = null;
     this.docCache = null;
+    this.docDirty = true;
     this.snippetCache = /* @__PURE__ */ new Map();
   }
   clearHighlights() {

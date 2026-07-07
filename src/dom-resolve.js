@@ -1,6 +1,6 @@
 import { debugWarn, SELECTORS } from "./constants.js";
 import { findAll } from "./matcher.js";
-import { cleanSnippet, hiddenSpansInReading, isInsideSpan } from "./markdown.js";
+import { cachedHiddenSpans, cleanSnippet, isInsideSpan } from "./markdown.js";
 import { cellInfoForMatch, locateInTables } from "./tables.js";
 
 export function getRenderRoot(view) {
@@ -259,15 +259,6 @@ export function resolveTableByPoint(cm, off, lines, m, matcher, tableLookup = nu
  * (each Chinese character is its own word).
  */
 
-function cachedHiddenSpansForLine(lineIdx, line, hiddenSpansByLine = null) {
-  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
-    return hiddenSpansInReading(line);
-  if (!hiddenSpansByLine.has(lineIdx)) {
-    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
-  }
-  return hiddenSpansByLine.get(lineIdx) || [];
-}
-
 export function resolveReadingCurrentRange(
   root,
   lines,
@@ -281,7 +272,7 @@ export function resolveReadingCurrentRange(
     const line = lines[m.line] || "";
     // Count only matches that are visible in Reading mode, so the k-th match in
     // the source line aligns with the k-th visible match in the DOM.
-    const spans = cachedHiddenSpansForLine(m.line, line, hiddenSpansByLine);
+    const spans = cachedHiddenSpans(m.line, line, hiddenSpansByLine);
     let kInLine = 0;
     for (const mt of findAll(line.slice(0, m.ch), matcher)) {
       if (!isInsideSpan(mt.index, spans)) kInLine++;

@@ -1,5 +1,3 @@
-import { isTableRow, parseCells } from "./tables.js";
-
 export function isWordSep(ch) {
   if (!ch) return true;
   if (/\s/.test(ch)) return true;
@@ -93,21 +91,13 @@ export function isInsideSpan(ch, spans) {
   return false;
 }
 
-/** For a table row, return the previous cell's text as a semantic anchor. */
-export function previousCellOf(line, ch) {
-  if (!isTableRow(line)) return null;
-  const cells = parseCells(line);
-  for (let c = 0; c < cells.length; c++) {
-    const cell = cells[c];
-    if (ch >= cell.start && ch <= cell.start + cell.text.length) {
-      for (let p = c - 1; p >= 0; p--) {
-        const t = cells[p].text.trim();
-        if (t) return t.replace(/[*_`]/g, "").replace(/\s+/g, " ").slice(0, 24);
-      }
-      return null;
-    }
+export function cachedHiddenSpans(lineIdx, line, hiddenSpansByLine = null) {
+  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
+    return hiddenSpansInReading(line);
+  if (!hiddenSpansByLine.has(lineIdx)) {
+    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(line));
   }
-  return null;
+  return hiddenSpansByLine.get(lineIdx) || [];
 }
 
 export function parseHeading(line, lineIdx) {

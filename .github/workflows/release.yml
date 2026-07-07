@@ -22,9 +22,9 @@ jobs:
           cat > release-notes.md <<EOF
           Live Find $TAG
 
-          - Replaces the Show more result list with automatic incremental rendering.
-          - Prefetches result rows earlier and during idle time for smoother scrolling.
-          - Stabilizes the result list scrollbar with an estimated spacer for unloaded rows.
+          - Uses TanStack Virtual for dynamically measured result-list virtualization.
+          - Refreshes rendered highlights through a shared rAF + 120ms scheduler and DOM mutation observer.
+          - Removes obsolete result-list code and reuses cached hidden Markdown spans.
           EOF
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" \

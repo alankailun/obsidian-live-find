@@ -34,12 +34,11 @@ export class FindBar {
     this.highlightRegistry = null;
     this.resultList = null;
     this.docCache = null;
+    this.docDirty = true;
     this.perfStats = {};
     this.perfSeq = 0;
     this.renderObserver = null;
     this.observedRenderRoot = null;
-    this.mutationFrame = null;
-    this.mutationWindow = null;
     this.hlFrame = null;
     this.hlTrailingTimer = null;
     this.hlTrailingWindow = null;
@@ -98,8 +97,16 @@ export class FindBar {
   }
 
   updateDocumentCache() {
+    if (this.docCache && !this.docDirty) {
+      this.docLines = this.docCache.lines;
+      this.tableLookup = this.docCache.tables;
+      this.headingLookup = this.docCache.headings;
+      return this.docCache;
+    }
+
     const text = this.editor.getValue();
     if (this.docCache && this.docCache.text === text) {
+      this.docDirty = false;
       this.docLines = this.docCache.lines;
       this.tableLookup = this.docCache.tables;
       this.headingLookup = this.docCache.headings;
@@ -117,6 +124,7 @@ export class FindBar {
       version: this.docCache ? this.docCache.version + 1 : 1,
     };
     this.docCache = cache;
+    this.docDirty = false;
     this.docLines = cache.lines;
     this.tableLookup = cache.tables;
     this.headingLookup = cache.headings;
@@ -181,7 +189,7 @@ export class FindBar {
         );
       });
       if (!hasNoteMutation) return;
-      this.scheduleRenderedDomRefresh();
+      this.scheduleHighlightRefresh();
     });
     this.renderObserver.observe(root, {
       childList: true,
@@ -194,38 +202,6 @@ export class FindBar {
     if (this.renderObserver) this.renderObserver.disconnect();
     this.renderObserver = null;
     this.observedRenderRoot = null;
-    this.cancelRenderedDomRefresh();
-  }
-
-  scheduleRenderedDomRefresh() {
-    if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
-      return;
-    if (this.mutationFrame != null) return;
-
-    const root = this.observedRenderRoot || getRenderRoot(this.view);
-    const win = root ? getElementWindow(root) : getElementWindow(this.barEl);
-    this.mutationWindow = win;
-    this.mutationFrame = win.requestAnimationFrame(() => {
-      this.mutationFrame = null;
-      this.mutationWindow = null;
-      this.refreshHighlights(this.highlightToken, {
-        fromScroll: true,
-        viewportOnly: true,
-      });
-    });
-  }
-
-  cancelRenderedDomRefresh() {
-    if (this.mutationFrame == null) return;
-    const win =
-      this.mutationWindow ||
-      (this.observedRenderRoot ? getElementWindow(this.observedRenderRoot) : null) ||
-      (this.barEl ? getElementWindow(this.barEl) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.mutationFrame);
-    }
-    this.mutationFrame = null;
-    this.mutationWindow = null;
   }
 
   scheduleHighlightRefresh() {
@@ -588,12 +564,18 @@ export class FindBar {
     });
 
     // Keep results in sync if the note is edited while the find bar is open.
-    this.onEditorChange = debounce(() => {
+    const refreshAfterEditorChange = debounce(() => {
+      if (!this.barEl) return;
+      this.refreshCurrentSearch({ preserveCurrent: true, jump: false });
+    }, DEBOUNCE_MS);
+    this.onEditorChange = () => {
       if (!this.barEl) return;
       const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
       if (active !== this.view) return;
-      this.refreshCurrentSearch({ preserveCurrent: true, jump: false });
-    }, DEBOUNCE_MS);
+      this.docDirty = true;
+      refreshAfterEditorChange();
+    };
+    this.onEditorChange.cancel = refreshAfterEditorChange.cancel;
     this.editorChangeEvt = this.plugin.app.workspace.on(
       "editor-change",
       this.onEditorChange
@@ -665,6 +647,7 @@ export class FindBar {
     this.tableLookup = null;
     this.headingLookup = null;
     this.docCache = null;
+    this.docDirty = true;
     this.snippetCache = new Map();
   }
 

@@ -8,11 +8,6 @@ export const DEBOUNCE_MS = 100;
 export const SCROLL_HIGHLIGHT_MIN_INTERVAL_MS = 120;
 export const DOM_HIGHLIGHT_VIEWPORT_MARGIN = 6000;
 export const MAX_DOM_HIGHLIGHTS = 2500;
-export const RESULT_RENDER_BATCH = 150;
-export const RESULT_RENDER_AHEAD_PX = 900;
-export const RESULT_IDLE_PREFETCH_BATCH = 75;
-export const RESULT_IDLE_PREFETCH_LIMIT = 600;
-export const RESULT_DISPLAY_CAP = 5000;
 export const DEFAULT_RESULT_ROW_HEIGHT = 42;
 
 export const SELECTORS = {

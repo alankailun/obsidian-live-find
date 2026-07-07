@@ -1,6 +1,6 @@
 import { findAll } from "./matcher.js";
 import { cellInfoForMatch, locateInTables, tableBlockForLine, tableDataCells } from "./tables.js";
-import { cleanSnippet, extendPrefixWords, hiddenSpansInReading, isInsideSpan, visibleInlineText, wordStartBefore } from "./markdown.js";
+import { cachedHiddenSpans, cleanSnippet, extendPrefixWords, isInsideSpan, visibleInlineText, wordStartBefore } from "./markdown.js";
 
 export function isMostlyCJK(text) {
   const compact = (text || "").replace(/\s+/g, "");
@@ -42,15 +42,6 @@ export function appendHighlightedSnippet(container, source, hitIdx, hitLen, keep
   container.createEl("strong", { text: win.slice(ls, le) });
   if (le < win.length) container.appendText(win.slice(le));
   if (e < source.length) container.appendText("…");
-}
-
-export function cachedHiddenSpans(lineIdx, lineText, hiddenSpansByLine = null) {
-  if (!hiddenSpansByLine || !Number.isFinite(lineIdx))
-    return hiddenSpansInReading(lineText);
-  if (!hiddenSpansByLine.has(lineIdx)) {
-    hiddenSpansByLine.set(lineIdx, hiddenSpansInReading(lineText));
-  }
-  return hiddenSpansByLine.get(lineIdx) || [];
 }
 
 export function normalizeSnippetPart(text) {
