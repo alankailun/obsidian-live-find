@@ -10,6 +10,7 @@ const HL_CURRENT = "live-find-current";
 const DEBUG = false;
 const DEBOUNCE_MS = 100;
 const MAX_DOM_HIGHLIGHTS = 2500;
+const RESULT_RENDER_BATCH = 200;
 
 const SELECTORS = {
   readingRoot: ".markdown-reading-view, .markdown-preview-view",
@@ -225,6 +226,34 @@ function getEditorView(editor) {
   return editor && editor.cm ? editor.cm : null;
 }
 
+function getElementDocument(el) {
+  return (el && el.ownerDocument) || document;
+}
+
+function getElementWindow(el) {
+  const doc = getElementDocument(el);
+  return (doc && doc.defaultView) || window;
+}
+
+function getViewDocument(view) {
+  return (view && view.containerEl && view.containerEl.ownerDocument) || document;
+}
+
+function getViewWindow(view) {
+  const doc = getViewDocument(view);
+  return (doc && doc.defaultView) || window;
+}
+
+function getHighlightSupport(view) {
+  const win = getViewWindow(view);
+  const css = win && win.CSS;
+  if (!css || !css.highlights || !win.Highlight) return null;
+  return {
+    Highlight: win.Highlight,
+    registry: css.highlights,
+  };
+}
+
 /** Complete, viewport-independent search of the note SOURCE. */
 function findSourceMatches(lines, matcher) {
   const res = [];
@@ -242,20 +271,23 @@ function findSourceMatches(lines, matcher) {
 function findRenderedMatches(root, matcher) {
   const matches = [];
   if (!root || !matcher || matcher.invalid) return matches;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+  const doc = getElementDocument(root);
+  const win = getElementWindow(root);
+  const filter = win.NodeFilter;
+  const walker = doc.createTreeWalker(root, filter.SHOW_TEXT, {
     acceptNode(node) {
       if (!node.nodeValue || !node.nodeValue.trim())
-        return NodeFilter.FILTER_REJECT;
+        return filter.FILTER_REJECT;
       const tag = node.parentElement && node.parentElement.tagName;
-      if (tag === "SCRIPT" || tag === "STYLE") return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
+      if (tag === "SCRIPT" || tag === "STYLE") return filter.FILTER_REJECT;
+      return filter.FILTER_ACCEPT;
     },
   });
   let node;
   while ((node = walker.nextNode())) {
     const text = node.nodeValue;
     for (const mt of findAll(text, matcher)) {
-      const range = document.createRange();
+      const range = doc.createRange();
       range.setStart(node, mt.index);
       range.setEnd(node, mt.index + mt.length);
       matches.push({
@@ -468,13 +500,15 @@ function cellInfoForMatch(line, ch, matcher) {
 }
 
 function findKthOccurrenceRange(el, matcher, k) {
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const doc = getElementDocument(el);
+  const win = getElementWindow(el);
+  const walker = doc.createTreeWalker(el, win.NodeFilter.SHOW_TEXT);
   let node;
   let count = 0;
   while ((node = walker.nextNode())) {
     for (const mt of findAll(node.nodeValue, matcher)) {
       if (count === k) {
-        const r = document.createRange();
+        const r = doc.createRange();
         r.setStart(node, mt.index);
         r.setEnd(node, mt.index + mt.length);
         return r;
@@ -490,7 +524,7 @@ function resolveByDomAtPos(cm, off, matcher) {
     if (!cm || typeof cm.domAtPos !== "function") return null;
     const d = cm.domAtPos(off);
     const node = d.node;
-    if (!node || node.nodeType !== Node.TEXT_NODE) return null;
+    if (!node || node.nodeType !== 3) return null;
     const all = findAll(node.nodeValue, matcher);
     let best = null;
     let bestDist = Infinity;
@@ -502,7 +536,7 @@ function resolveByDomAtPos(cm, off, matcher) {
       }
     }
     if (!best || bestDist > 3) return null;
-    const r = document.createRange();
+    const r = getElementDocument(node).createRange();
     r.setStart(node, best.index);
     r.setEnd(node, best.index + best.length);
     return r;
@@ -514,7 +548,7 @@ function resolveByDomAtPos(cm, off, matcher) {
 
 function closestElementFromNode(node) {
   if (!node) return null;
-  return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  return node.nodeType === 1 ? node : node.parentElement;
 }
 
 function tableFromDomAtPos(cm, off) {
@@ -532,12 +566,14 @@ function tableFromDomAtPos(cm, off) {
 function tableFromPoint(cm, off) {
   try {
     if (!cm || typeof cm.coordsAtPos !== "function") return null;
+    const doc = getElementDocument(cm.dom);
+    const win = getElementWindow(cm.dom);
     const coords = cm.coordsAtPos(off);
     if (!coords) return null;
     const y = (coords.top + coords.bottom) / 2;
-    const xs = [coords.left + 1, coords.left + 20, 120, window.innerWidth / 2];
+    const xs = [coords.left + 1, coords.left + 20, 120, win.innerWidth / 2];
     for (const x of xs) {
-      const el = document.elementFromPoint(x, y);
+      const el = doc.elementFromPoint(x, y);
       const t = el && el.closest && el.closest("table");
       if (t) return t;
     }
@@ -1047,7 +1083,6 @@ class FindBar {
   constructor(plugin, view) {
     this.plugin = plugin;
     this.view = view;
-    this.editor = view.editor;
     this.matches = [];
     this.current = -1;
     this.query = "";
@@ -1067,8 +1102,15 @@ class FindBar {
     this.renderedTextMode = false; // reading/live preview hide some Markdown syntax
     this.currentDomRange = null; // anchored current range in reading mode
     this.highlightToken = 0;
+    this.highlightRegistry = null;
+    this.resultRenderLimit = RESULT_RENDER_BATCH;
+    this.renderedResultCount = 0;
     this.barEl = null;
     this.resultsEl = null;
+  }
+
+  get editor() {
+    return this.view && this.view.editor;
   }
 
   isOpen() {
@@ -1390,7 +1432,7 @@ class FindBar {
       if (mode === this.lastViewMode) return;
       this.lastViewMode = mode;
       this.updateScroller();
-      this.refreshCurrentSearch();
+      this.refreshCurrentSearch({ preserveCurrent: true });
     });
 
     // Keep results in sync if the note is edited while the find bar is open.
@@ -1464,30 +1506,51 @@ class FindBar {
     this.current = -1;
     this.query = ""; // ensure late timers can't repaint highlights
     this.matcher = null;
+    this.resultRenderLimit = RESULT_RENDER_BATCH;
+    this.renderedResultCount = 0;
   }
 
   clearHighlights() {
-    if (window.CSS && CSS.highlights) {
-      CSS.highlights.delete(HL_ALL);
-      CSS.highlights.delete(HL_CURRENT);
+    const registries = [this.highlightRegistry];
+    const support = getHighlightSupport(this.view);
+    if (support) registries.push(support.registry);
+
+    const seen = new Set();
+    for (const registry of registries) {
+      if (!registry || seen.has(registry)) continue;
+      seen.add(registry);
+      registry.delete(HL_ALL);
+      registry.delete(HL_CURRENT);
     }
+    this.highlightRegistry = null;
   }
 
   domApply(dom, currentRange) {
-    CSS.highlights.set(HL_ALL, new Highlight(...dom.map((d) => d.range)));
+    const support = getHighlightSupport(this.view);
+    if (!support) return;
+    if (this.highlightRegistry && this.highlightRegistry !== support.registry) {
+      this.highlightRegistry.delete(HL_ALL);
+      this.highlightRegistry.delete(HL_CURRENT);
+    }
+    this.highlightRegistry = support.registry;
+
+    support.registry.set(
+      HL_ALL,
+      new support.Highlight(...dom.map((d) => d.range))
+    );
     if (currentRange) {
-      const hl = new Highlight(currentRange);
+      const hl = new support.Highlight(currentRange);
       hl.priority = 1;
-      CSS.highlights.set(HL_CURRENT, hl);
+      support.registry.set(HL_CURRENT, hl);
     } else {
-      CSS.highlights.delete(HL_CURRENT);
+      support.registry.delete(HL_CURRENT);
     }
   }
 
   refreshHighlights(token = this.highlightToken) {
     if (token !== this.highlightToken) return null;
     if (!this.barEl) return null; // bail if a late timer fires after close()
-    if (!(window.CSS && CSS.highlights && window.Highlight)) return null;
+    if (!getHighlightSupport(this.view)) return null;
     if (!this.query || !this.matcher || this.matcher.invalid)
       return this.clearHighlights(), null;
 
@@ -1658,6 +1721,7 @@ class FindBar {
           ? this.nearestMatchIndexToLine(this.anchorLineFromViewport())
           : 0
       : -1;
+    this.resultRenderLimit = Math.max(RESULT_RENDER_BATCH, this.current + 1);
     this.currentDomRange = null;
     this.renderList();
     this.updateCount();
@@ -1820,14 +1884,21 @@ class FindBar {
     if (!el) return;
     el.empty();
     if (!this.query || !this.matches.length) {
+      this.renderedResultCount = 0;
       el.style.display = "none";
       return;
     }
     el.style.display = "block";
     const groupInfo = this.getMatchGroupInfo();
+    const visibleCount = Math.min(
+      this.matches.length,
+      Math.max(this.resultRenderLimit || RESULT_RENDER_BATCH, this.current + 1)
+    );
+    this.renderedResultCount = visibleCount;
 
     let lastGroupKey = null;
-    this.matches.forEach((m, i) => {
+    for (let i = 0; i < visibleCount; i++) {
+      const m = this.matches[i];
       const groupItem = groupInfo ? groupInfo.items[i] : null;
       const group = groupItem ? groupItem.group : null;
       if (groupItem) {
@@ -1884,7 +1955,25 @@ class FindBar {
         this.markActiveRow();
         if (this.input) this.input.focus(); // keep keyboard nav alive
       };
-    });
+    }
+
+    if (visibleCount < this.matches.length) {
+      const more = el.createEl("button", {
+        cls: "lf-more",
+        text: `Show more (${visibleCount}/${this.matches.length})`,
+      });
+      more.onclick = (evt) => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        this.resultRenderLimit = Math.min(
+          this.matches.length,
+          visibleCount + RESULT_RENDER_BATCH
+        );
+        this.renderList();
+        this.markActiveRow();
+        if (this.input) this.input.focus();
+      };
+    }
     this.updateGroupCounts();
   }
 
@@ -1919,6 +2008,17 @@ class FindBar {
 
   markActiveRow() {
     if (!this.resultsEl) return;
+    if (
+      this.current >= 0 &&
+      this.current >= (this.renderedResultCount || 0) &&
+      this.current < this.matches.length
+    ) {
+      this.resultRenderLimit = Math.max(
+        this.resultRenderLimit || RESULT_RENDER_BATCH,
+        this.current + 1
+      );
+      this.renderList();
+    }
     const rows = this.resultsEl.querySelectorAll(".lf-row");
     for (const row of rows) {
       const i = Number(row.dataset.matchIndex);
@@ -1945,7 +2045,7 @@ module.exports = class LiveFindPlugin extends Plugin {
       callback: () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) return new Notice("Open a Markdown note first.");
-        if (!(window.CSS && CSS.highlights && window.Highlight))
+        if (!getHighlightSupport(view))
           return new Notice("This Obsidian version lacks the CSS Highlight API.");
         if (this.bar && this.bar.view !== view) this.bar.close();
         if (!this.bar || !this.bar.isOpen()) this.bar = new FindBar(this, view);
@@ -1983,9 +2083,5 @@ module.exports = class LiveFindPlugin extends Plugin {
 
   onunload() {
     if (this.bar) this.bar.close();
-    if (window.CSS && CSS.highlights) {
-      CSS.highlights.delete(HL_ALL);
-      CSS.highlights.delete(HL_CURRENT);
-    }
   }
 };
