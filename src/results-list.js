@@ -69,6 +69,7 @@ export class VirtualResultList {
     this.stickyEl = null;
     this.renderedItems = new Map();
     this.activeRow = null;
+    this.pendingActiveScroll = null;
     this.renderFrame = null;
     this.cleanupVirtualizer = null;
 
@@ -87,6 +88,7 @@ export class VirtualResultList {
     this.rows = [];
     this.matchRowByIndex = new Map();
     this.activeRow = null;
+    this.pendingActiveScroll = null;
   }
 
   clear() {
@@ -96,6 +98,7 @@ export class VirtualResultList {
     this.matchRowByIndex = new Map();
     this.groupInfo = null;
     this.activeRow = null;
+    this.pendingActiveScroll = null;
     this.clearDom();
     this.configureVirtualizer(0);
   }
@@ -105,6 +108,7 @@ export class VirtualResultList {
     this.itemCount = Math.max(0, Number(itemCount) || 0);
     this.rebuildRows();
     this.activeRow = null;
+    this.pendingActiveScroll = null;
     this.clearDom();
     if (!this.itemCount || !this.rows.length) {
       this.configureVirtualizer(0);
@@ -264,6 +268,7 @@ export class VirtualResultList {
 
     this.updateStickyGroup(virtualItems);
     this.applyActiveClass(false);
+    this.settleActiveScroll();
     if (this.onAfterRender) this.onAfterRender();
   }
 
@@ -357,6 +362,32 @@ export class VirtualResultList {
     }
   }
 
+  settleActiveScroll() {
+    const pending = this.pendingActiveScroll;
+    if (!pending || !this.virtualizer) return;
+    if (pending.index !== this.current()) {
+      this.pendingActiveScroll = null;
+      return;
+    }
+
+    const row = this.el
+      ? this.el.querySelector(`.lf-row[data-match-index="${pending.index}"]`)
+      : null;
+    if (row) row.classList.add("is-active");
+
+    if (pending.attempts >= 2) {
+      this.pendingActiveScroll = null;
+      return;
+    }
+
+    pending.attempts++;
+    this.virtualizer.scrollToIndex(pending.rowIndex, { align: pending.align });
+    if (row && pending.align === "center") {
+      row.scrollIntoView({ block: "center", inline: "nearest" });
+    }
+    this.scheduleRender();
+  }
+
   setActive(index, options = {}) {
     if (!this.el || !this.virtualizer) return;
     const rowIndex = this.rowIndexForMatch(index);
@@ -367,9 +398,18 @@ export class VirtualResultList {
     }
 
     if (options.scroll !== false) {
+      const align = scrollAlignFromBlock(options.block);
+      this.pendingActiveScroll = {
+        index,
+        rowIndex,
+        align,
+        attempts: 0,
+      };
       this.virtualizer.scrollToIndex(rowIndex, {
-        align: scrollAlignFromBlock(options.block),
+        align,
       });
+    } else {
+      this.pendingActiveScroll = null;
     }
     this.scheduleRender();
     this.applyActiveClass(false);

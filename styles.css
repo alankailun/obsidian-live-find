@@ -232,6 +232,11 @@
 
 .lf-results .lf-row.is-active {
   background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  box-shadow: inset 3px 0 0 var(--interactive-accent);
+}
+
+.lf-results .lf-row.is-active .lf-line {
+  color: var(--text-accent);
 }
 
 .lf-results .lf-line {
