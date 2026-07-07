@@ -10,7 +10,11 @@ const HL_CURRENT = "live-find-current";
 const DEBUG = false;
 const DEBOUNCE_MS = 100;
 const MAX_DOM_HIGHLIGHTS = 2500;
-const RESULT_RENDER_BATCH = 200;
+const RESULT_RENDER_BATCH = 150;
+const RESULT_RENDER_AHEAD_PX = 900;
+const RESULT_IDLE_PREFETCH_BATCH = 75;
+const RESULT_IDLE_PREFETCH_LIMIT = 600;
+const DEFAULT_RESULT_ROW_HEIGHT = 42;
 
 const SELECTORS = {
   readingRoot: ".markdown-reading-view, .markdown-preview-view",
@@ -1105,6 +1109,18 @@ class FindBar {
     this.highlightRegistry = null;
     this.resultRenderLimit = RESULT_RENDER_BATCH;
     this.renderedResultCount = 0;
+    this.renderedGroupKey = null;
+    this.activeResultRow = null;
+    this.resultObserver = null;
+    this.resultSentinelEl = null;
+    this.resultSpacerEl = null;
+    this.resultAverageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
+    this.resultRenderToken = 0;
+    this.resultPrefetchId = null;
+    this.resultPrefetchKind = null;
+    this.resultPrefetchWindow = null;
+    this.resultCatchupFrame = null;
+    this.resultCatchupWindow = null;
     this.barEl = null;
     this.resultsEl = null;
   }
@@ -1372,6 +1388,7 @@ class FindBar {
 
     this.resultsEl = host.createDiv({ cls: "lf-results" });
     this.resultsEl.style.display = "none";
+    this.setupResultObserver();
     this.updateCount(); // collapse the empty count/separator on open
 
     this.onInput = debounce(
@@ -1486,6 +1503,7 @@ class FindBar {
       this.scroller.removeEventListener("scroll", this.onScroll);
     }
     this.scroller = null;
+    this.disconnectResultObserver();
 
     if (this.layoutEvt) this.plugin.app.workspace.offref(this.layoutEvt);
     if (this.editorChangeEvt) this.plugin.app.workspace.offref(this.editorChangeEvt);
@@ -1501,13 +1519,21 @@ class FindBar {
     this.input = null;
     this.onPaste = null;
     this.onKeydown = null;
+    this.onResultsScroll = null;
     this.onEditorChange = null;
     this.matches = [];
     this.current = -1;
     this.query = ""; // ensure late timers can't repaint highlights
     this.matcher = null;
+    this.cancelResultPrefetch();
+    this.cancelResultCatchup();
     this.resultRenderLimit = RESULT_RENDER_BATCH;
     this.renderedResultCount = 0;
+    this.renderedGroupKey = null;
+    this.activeResultRow = null;
+    this.resultSentinelEl = null;
+    this.resultSpacerEl = null;
+    this.resultAverageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
   }
 
   clearHighlights() {
@@ -1721,7 +1747,7 @@ class FindBar {
           ? this.nearestMatchIndexToLine(this.anchorLineFromViewport())
           : 0
       : -1;
-    this.resultRenderLimit = Math.max(RESULT_RENDER_BATCH, this.current + 1);
+    this.resultRenderLimit = RESULT_RENDER_BATCH;
     this.currentDomRange = null;
     this.renderList();
     this.updateCount();
@@ -1882,22 +1908,42 @@ class FindBar {
   renderList() {
     const el = this.resultsEl;
     if (!el) return;
+    this.resultRenderToken += 1;
+    this.cancelResultPrefetch();
+    this.cancelResultCatchup();
+    this.clearResultTail();
     el.empty();
+    this.renderedResultCount = 0;
+    this.renderedGroupKey = null;
+    this.activeResultRow = null;
     if (!this.query || !this.matches.length) {
-      this.renderedResultCount = 0;
       el.style.display = "none";
       return;
     }
     el.style.display = "block";
-    const groupInfo = this.getMatchGroupInfo();
-    const visibleCount = Math.min(
+    el.scrollTop = 0;
+    this.resultRenderLimit = Math.min(
       this.matches.length,
-      Math.max(this.resultRenderLimit || RESULT_RENDER_BATCH, this.current + 1)
+      Math.max(this.resultRenderLimit || RESULT_RENDER_BATCH, RESULT_RENDER_BATCH)
     );
-    this.renderedResultCount = visibleCount;
+    this.renderResultChunk(this.resultRenderLimit);
+    this.markActiveRow({ scroll: false });
+    this.scheduleResultPrefetch();
+  }
 
-    let lastGroupKey = null;
-    for (let i = 0; i < visibleCount; i++) {
+  renderResultChunk(targetCount) {
+    const el = this.resultsEl;
+    if (!el || !this.matches.length) return false;
+
+    const groupInfo = this.getMatchGroupInfo();
+    const start = this.renderedResultCount || 0;
+    const end = Math.min(this.matches.length, targetCount);
+    if (end <= start) return false;
+    this.clearResultTail();
+    const beforeHeight = el.scrollHeight;
+
+    let lastGroupKey = this.renderedGroupKey;
+    for (let i = start; i < end; i++) {
       const m = this.matches[i];
       const groupItem = groupInfo ? groupInfo.items[i] : null;
       const group = groupItem ? groupItem.group : null;
@@ -1918,7 +1964,10 @@ class FindBar {
 
       const row = el.createDiv({ cls: "lf-row" });
       row.dataset.matchIndex = String(i);
-      if (i === this.current) row.addClass("is-active");
+      if (i === this.current) {
+        row.addClass("is-active");
+        this.activeResultRow = row;
+      }
 
       // Second line: nearest precise heading above this match.
       const head = this.showResultHeadings ? nearestHeading(this.docLines, m.line) : null;
@@ -1957,24 +2006,231 @@ class FindBar {
       };
     }
 
-    if (visibleCount < this.matches.length) {
-      const more = el.createEl("button", {
-        cls: "lf-more",
-        text: `Show more (${visibleCount}/${this.matches.length})`,
-      });
-      more.onclick = (evt) => {
-        evt.preventDefault();
-        evt.stopPropagation();
-        this.resultRenderLimit = Math.min(
-          this.matches.length,
-          visibleCount + RESULT_RENDER_BATCH
-        );
-        this.renderList();
-        this.markActiveRow();
-        if (this.input) this.input.focus();
-      };
+    this.renderedResultCount = end;
+    this.renderedGroupKey = lastGroupKey;
+    this.updateAverageResultHeight(el.scrollHeight - beforeHeight, end - start);
+    this.updateResultTail();
+    return true;
+  }
+
+  ensureResultRendered(index) {
+    if (index < 0 || index >= this.matches.length) return false;
+    if (index < (this.renderedResultCount || 0)) return true;
+    if (index >= (this.renderedResultCount || 0) + RESULT_RENDER_BATCH) {
+      return false;
     }
-    this.updateGroupCounts();
+    this.resultRenderLimit = Math.min(
+      this.matches.length,
+      Math.max(index + 1, (this.renderedResultCount || 0) + RESULT_RENDER_BATCH)
+    );
+    const changed = this.renderResultChunk(this.resultRenderLimit);
+    if (changed) this.updateGroupCounts();
+    return index < (this.renderedResultCount || 0);
+  }
+
+  setupResultObserver() {
+    const el = this.resultsEl;
+    if (!el) return;
+    this.disconnectResultObserver();
+
+    this.onResultsScroll = () => this.maybeRenderMoreResults();
+    el.addEventListener("scroll", this.onResultsScroll, { passive: true });
+
+    const win = getElementWindow(el);
+    if (win && typeof win.IntersectionObserver === "function") {
+      this.resultObserver = new win.IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            this.maybeRenderMoreResults({ force: true });
+          }
+        },
+        {
+          root: el,
+          rootMargin: `0px 0px ${RESULT_RENDER_AHEAD_PX}px 0px`,
+          threshold: 0,
+        }
+      );
+    }
+  }
+
+  disconnectResultObserver() {
+    if (this.resultObserver) this.resultObserver.disconnect();
+    this.resultObserver = null;
+
+    if (this.resultsEl && this.onResultsScroll) {
+      this.resultsEl.removeEventListener("scroll", this.onResultsScroll);
+    }
+    this.onResultsScroll = null;
+    this.resultSentinelEl = null;
+    this.resultSpacerEl = null;
+  }
+
+  clearResultTail() {
+    if (this.resultSentinelEl) {
+      if (this.resultObserver) this.resultObserver.unobserve(this.resultSentinelEl);
+      this.resultSentinelEl.remove();
+      this.resultSentinelEl = null;
+    }
+    if (this.resultSpacerEl) {
+      this.resultSpacerEl.remove();
+      this.resultSpacerEl = null;
+    }
+  }
+
+  updateAverageResultHeight(addedHeight, addedMatches) {
+    if (addedMatches <= 0 || addedHeight <= 0) return;
+    const sample = addedHeight / addedMatches;
+    if (!Number.isFinite(sample) || sample < 12) return;
+    const current = this.resultAverageRowHeight || DEFAULT_RESULT_ROW_HEIGHT;
+    this.resultAverageRowHeight = current * 0.65 + sample * 0.35;
+  }
+
+  updateResultTail() {
+    const el = this.resultsEl;
+    if (!el || !this.matches.length) return;
+    this.clearResultTail();
+    if ((this.renderedResultCount || 0) >= this.matches.length) return;
+
+    this.resultSentinelEl = el.createDiv({ cls: "lf-sentinel" });
+    if (this.resultObserver) {
+      this.resultObserver.observe(this.resultSentinelEl);
+    }
+    const remaining = Math.max(
+      0,
+      this.matches.length - (this.renderedResultCount || 0)
+    );
+    this.resultSpacerEl = el.createDiv({ cls: "lf-spacer" });
+    this.resultSpacerEl.style.height = `${Math.ceil(
+      remaining * (this.resultAverageRowHeight || DEFAULT_RESULT_ROW_HEIGHT)
+    )}px`;
+  }
+
+  isNearResultsBottom() {
+    const el = this.resultsEl;
+    if (!el) return false;
+    const tailTop = this.resultSentinelEl
+      ? this.resultSentinelEl.offsetTop
+      : el.scrollHeight;
+    return (
+      el.scrollTop + el.clientHeight >=
+      tailTop - RESULT_RENDER_AHEAD_PX
+    );
+  }
+
+  maybeRenderMoreResults(options = {}) {
+    if (
+      !this.resultsEl ||
+      !this.matches.length ||
+      (this.renderedResultCount || 0) >= this.matches.length
+    ) {
+      return;
+    }
+    if (!options.force && !this.isNearResultsBottom()) return;
+
+    const scrollTop = this.resultsEl.scrollTop;
+    this.resultRenderLimit = Math.min(
+      this.matches.length,
+      Math.max(
+        this.resultRenderLimit || RESULT_RENDER_BATCH,
+        (this.renderedResultCount || 0) + RESULT_RENDER_BATCH
+      )
+    );
+    if (this.renderResultChunk(this.resultRenderLimit)) {
+      if (options.preserveScroll !== false) this.resultsEl.scrollTop = scrollTop;
+      this.updateGroupCounts();
+      this.scheduleResultPrefetch();
+      if (this.isNearResultsBottom()) this.scheduleResultCatchup();
+    }
+  }
+
+  scheduleResultPrefetch() {
+    const el = this.resultsEl;
+    if (!el || this.resultPrefetchId != null || !this.matches.length) return;
+
+    const cap = Math.min(this.matches.length, RESULT_IDLE_PREFETCH_LIMIT);
+    if ((this.renderedResultCount || 0) >= cap) return;
+
+    const win = getElementWindow(el);
+    const token = this.resultRenderToken;
+    const run = () => {
+      this.resultPrefetchId = null;
+      this.resultPrefetchKind = null;
+      this.resultPrefetchWindow = null;
+
+      if (
+        token !== this.resultRenderToken ||
+        !this.resultsEl ||
+        !this.matches.length
+      ) {
+        return;
+      }
+
+      const limit = Math.min(this.matches.length, RESULT_IDLE_PREFETCH_LIMIT);
+      if ((this.renderedResultCount || 0) >= limit) return;
+
+      const scrollTop = this.resultsEl.scrollTop;
+      const target = Math.min(
+        limit,
+        (this.renderedResultCount || 0) + RESULT_IDLE_PREFETCH_BATCH
+      );
+      if (this.renderResultChunk(target)) {
+        this.resultsEl.scrollTop = scrollTop;
+        this.updateGroupCounts();
+      }
+      this.scheduleResultPrefetch();
+    };
+
+    if (win && typeof win.requestIdleCallback === "function") {
+      this.resultPrefetchKind = "idle";
+      this.resultPrefetchId = win.requestIdleCallback(run, { timeout: 350 });
+    } else {
+      this.resultPrefetchKind = "timeout";
+      this.resultPrefetchId = win.setTimeout(run, 80);
+    }
+    this.resultPrefetchWindow = win;
+  }
+
+  cancelResultPrefetch() {
+    if (this.resultPrefetchId == null) return;
+    const win =
+      this.resultPrefetchWindow ||
+      (this.resultsEl ? getElementWindow(this.resultsEl) : null);
+    if (
+      this.resultPrefetchKind === "idle" &&
+      win &&
+      typeof win.cancelIdleCallback === "function"
+    ) {
+      win.cancelIdleCallback(this.resultPrefetchId);
+    } else if (win && typeof win.clearTimeout === "function") {
+      win.clearTimeout(this.resultPrefetchId);
+    }
+    this.resultPrefetchId = null;
+    this.resultPrefetchKind = null;
+    this.resultPrefetchWindow = null;
+  }
+
+  scheduleResultCatchup() {
+    const el = this.resultsEl;
+    if (!el || this.resultCatchupFrame != null) return;
+    const win = getElementWindow(el);
+    this.resultCatchupWindow = win;
+    this.resultCatchupFrame = win.requestAnimationFrame(() => {
+      this.resultCatchupFrame = null;
+      this.resultCatchupWindow = null;
+      this.maybeRenderMoreResults();
+    });
+  }
+
+  cancelResultCatchup() {
+    if (this.resultCatchupFrame == null) return;
+    const win =
+      this.resultCatchupWindow ||
+      (this.resultsEl ? getElementWindow(this.resultsEl) : null);
+    if (win && typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(this.resultCatchupFrame);
+    }
+    this.resultCatchupFrame = null;
+    this.resultCatchupWindow = null;
   }
 
   setText(el, text) {
@@ -2006,26 +2262,26 @@ class FindBar {
     }
   }
 
-  markActiveRow() {
+  markActiveRow(options = {}) {
     if (!this.resultsEl) return;
-    if (
-      this.current >= 0 &&
-      this.current >= (this.renderedResultCount || 0) &&
-      this.current < this.matches.length
-    ) {
-      this.resultRenderLimit = Math.max(
-        this.resultRenderLimit || RESULT_RENDER_BATCH,
-        this.current + 1
-      );
-      this.renderList();
+    const shouldScroll = options.scroll !== false;
+    this.ensureResultRendered(this.current);
+    const previous =
+      this.activeResultRow && this.activeResultRow.isConnected
+        ? this.activeResultRow
+        : null;
+    const row =
+      this.current >= 0
+        ? this.resultsEl.querySelector(
+            `.lf-row[data-match-index="${this.current}"]`
+          )
+        : null;
+    if (previous && previous !== row) previous.classList.remove("is-active");
+    if (row) {
+      row.classList.add("is-active");
+      if (shouldScroll) row.scrollIntoView({ block: "nearest" });
     }
-    const rows = this.resultsEl.querySelectorAll(".lf-row");
-    for (const row of rows) {
-      const i = Number(row.dataset.matchIndex);
-      const active = i === this.current;
-      row.toggleClass("is-active", active);
-      if (active) row.scrollIntoView({ block: "nearest" });
-    }
+    this.activeResultRow = row || null;
     this.updateGroupCounts();
   }
 }

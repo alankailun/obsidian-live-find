@@ -115,6 +115,7 @@
   border-radius: 10px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
   padding: 4px;
+  overflow-anchor: none;
 }
 
 .lf-results .lf-row {
@@ -211,19 +212,11 @@
   white-space: nowrap;
 }
 
-.lf-results .lf-more {
-  width: 100%;
-  margin-top: 4px;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
+.lf-results .lf-sentinel {
+  height: 1px;
+  pointer-events: none;
 }
 
-.lf-results .lf-more:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
+.lf-results .lf-spacer {
+  pointer-events: none;
 }

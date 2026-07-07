@@ -22,9 +22,9 @@ jobs:
           cat > release-notes.md <<EOF
           Live Find $TAG
 
-          - Preserves the current match when toggling between Source, Live Preview, and Reading mode.
-          - Fixes rendered highlights in Obsidian popout windows.
-          - Limits the result list to an initial batch with a Show more button for large match sets.
+          - Replaces the Show more result list with automatic incremental rendering.
+          - Prefetches result rows earlier and during idle time for smoother scrolling.
+          - Stabilizes the result list scrollbar with an estimated spacer for unloaded rows.
           EOF
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$TAG" \
