@@ -1,10 +1,10 @@
 import { MarkdownView, Menu, setIcon } from "obsidian";
-import { DEFAULT_FIND_OPTIONS, DEBOUNCE_MS, DOM_HIGHLIGHT_VIEWPORT_MARGIN, MAX_DOM_HIGHLIGHTS, SCROLL_HIGHLIGHT_THROTTLE_MS, debugWarn, debounce, headingLevelLabel, headingLevelMenuLabel, normalizeHeadingGroupLevel, throttle } from "./constants.js";
+import { DEFAULT_FIND_OPTIONS, DEBOUNCE_MS, DOM_HIGHLIGHT_VIEWPORT_MARGIN, MAX_DOM_HIGHLIGHTS, SCROLL_HIGHLIGHT_MIN_INTERVAL_MS, debugWarn, debounce, headingLevelLabel, headingLevelMenuLabel, normalizeHeadingGroupLevel } from "./constants.js";
 import { buildMatcher, findSourceMatches, normalizePlainQuery } from "./matcher.js";
 import { buildTableLookup, isDelimiterRow, locateInTables } from "./tables.js";
 import { buildHeadingLookup, cleanHeadingText, cleanSnippet, headingGroupForLine, headingGroupKey, hiddenSpansInReading, isInsideSpan, nearestHeading } from "./markdown.js";
 import { appendHighlightedSnippet, buildSnippetData } from "./snippets.js";
-import { centerEditorOffset, findRenderedMatches, getEditorView, getElementWindow, getRenderRoot, getScroller, isLivePreviewMode, resolveByDomAtPos, resolveReadingCurrentRange, resolveTableByPoint, scrollRangeIntoView } from "./dom-resolve.js";
+import { centerEditorOffset, findRenderedMatches, getEditorView, getElementWindow, getRenderRoot, getScroller, getViewWindow, isLivePreviewMode, resolveByDomAtPos, resolveReadingCurrentRange, resolveTableByPoint, scrollRangeIntoView } from "./dom-resolve.js";
 import { applyHighlights, clearHighlights as clearRegisteredHighlights, getHighlightSupport, limitDomHighlightsAroundCurrent } from "./highlighter.js";
 import { VirtualResultList } from "./results-list.js";
 
@@ -40,6 +40,10 @@ export class FindBar {
     this.observedRenderRoot = null;
     this.mutationFrame = null;
     this.mutationWindow = null;
+    this.hlFrame = null;
+    this.hlTrailingTimer = null;
+    this.hlTrailingWindow = null;
+    this.lastHlRefreshAt = 0;
     this.barEl = null;
     this.resultsEl = null;
   }
@@ -222,6 +226,61 @@ export class FindBar {
     }
     this.mutationFrame = null;
     this.mutationWindow = null;
+  }
+
+  scheduleHighlightRefresh() {
+    if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
+      return;
+    if (this.hlFrame != null) return;
+
+    const win = getViewWindow(this.view);
+    const perf =
+      win.performance ||
+      (typeof performance !== "undefined" ? performance : null);
+    this.hlFrame = win.requestAnimationFrame(() => {
+      this.hlFrame = null;
+      const now = perf ? perf.now() : Date.now();
+      const since = now - (this.lastHlRefreshAt || 0);
+      if (since >= SCROLL_HIGHLIGHT_MIN_INTERVAL_MS) {
+        this.cancelHighlightTrailing();
+        this.runHighlightRefresh();
+        return;
+      }
+
+      this.cancelHighlightTrailing();
+      this.hlTrailingWindow = win;
+      this.hlTrailingTimer = win.setTimeout(() => {
+        this.hlTrailingTimer = null;
+        this.hlTrailingWindow = null;
+        this.runHighlightRefresh();
+      }, SCROLL_HIGHLIGHT_MIN_INTERVAL_MS - since);
+    });
+  }
+
+  runHighlightRefresh() {
+    const win = getViewWindow(this.view);
+    const perf =
+      win.performance ||
+      (typeof performance !== "undefined" ? performance : null);
+    this.lastHlRefreshAt = perf ? perf.now() : Date.now();
+    this.refreshHighlights(this.highlightToken, { fromScroll: true });
+  }
+
+  cancelHighlightTrailing() {
+    if (this.hlTrailingTimer == null) return;
+    const win = this.hlTrailingWindow || getViewWindow(this.view);
+    win.clearTimeout(this.hlTrailingTimer);
+    this.hlTrailingTimer = null;
+    this.hlTrailingWindow = null;
+  }
+
+  cancelHighlightRefresh() {
+    if (this.hlFrame != null) {
+      const win = getViewWindow(this.view);
+      win.cancelAnimationFrame(this.hlFrame);
+      this.hlFrame = null;
+    }
+    this.cancelHighlightTrailing();
   }
 
   refreshCurrentSearch(options = {}) {
@@ -511,10 +570,7 @@ export class FindBar {
     };
     this.input.addEventListener("keydown", this.onKeydown);
 
-    this.onScroll = throttle(
-      () => this.refreshHighlights(this.highlightToken, { fromScroll: true }),
-      SCROLL_HIGHLIGHT_THROTTLE_MS
-    );
+    this.onScroll = () => this.scheduleHighlightRefresh();
     this.updateScroller();
     this.updateRenderObserver();
 
@@ -564,7 +620,7 @@ export class FindBar {
 
   close() {
     if (this.onInput && this.onInput.cancel) this.onInput.cancel();
-    if (this.onScroll && this.onScroll.cancel) this.onScroll.cancel();
+    this.cancelHighlightRefresh();
     if (this.onEditorChange && this.onEditorChange.cancel)
       this.onEditorChange.cancel();
 

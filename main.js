@@ -29,7 +29,7 @@ var HL_ALL = "live-find-all";
 var HL_CURRENT = "live-find-current";
 var DEBUG = false;
 var DEBOUNCE_MS = 100;
-var SCROLL_HIGHLIGHT_THROTTLE_MS = 150;
+var SCROLL_HIGHLIGHT_MIN_INTERVAL_MS = 120;
 var DOM_HIGHLIGHT_VIEWPORT_MARGIN = 6e3;
 var MAX_DOM_HIGHLIGHTS = 2500;
 var DEFAULT_RESULT_ROW_HEIGHT = 42;
@@ -84,39 +84,6 @@ function debounce(fn, ms) {
   wrapped.cancel = () => {
     clearTimeout(t);
     t = null;
-  };
-  return wrapped;
-}
-function throttle(fn, ms) {
-  let last = 0;
-  let timer = null;
-  let pendingArgs = null;
-  const run = (args) => {
-    last = Date.now();
-    timer = null;
-    pendingArgs = null;
-    fn(...args);
-  };
-  const wrapped = (...args) => {
-    const now = Date.now();
-    const remaining = ms - (now - last);
-    pendingArgs = args;
-    if (remaining <= 0 || remaining > ms) {
-      if (timer != null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      run(args);
-      return;
-    }
-    if (timer == null) {
-      timer = setTimeout(() => run(pendingArgs || []), remaining);
-    }
-  };
-  wrapped.cancel = () => {
-    if (timer != null) clearTimeout(timer);
-    timer = null;
-    pendingArgs = null;
   };
   return wrapped;
 }
@@ -2751,6 +2718,10 @@ var FindBar = class {
     this.observedRenderRoot = null;
     this.mutationFrame = null;
     this.mutationWindow = null;
+    this.hlFrame = null;
+    this.hlTrailingTimer = null;
+    this.hlTrailingWindow = null;
+    this.lastHlRefreshAt = 0;
     this.barEl = null;
     this.resultsEl = null;
   }
@@ -2904,6 +2875,51 @@ var FindBar = class {
     }
     this.mutationFrame = null;
     this.mutationWindow = null;
+  }
+  scheduleHighlightRefresh() {
+    if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
+      return;
+    if (this.hlFrame != null) return;
+    const win = getViewWindow(this.view);
+    const perf = win.performance || (typeof performance !== "undefined" ? performance : null);
+    this.hlFrame = win.requestAnimationFrame(() => {
+      this.hlFrame = null;
+      const now = perf ? perf.now() : Date.now();
+      const since = now - (this.lastHlRefreshAt || 0);
+      if (since >= SCROLL_HIGHLIGHT_MIN_INTERVAL_MS) {
+        this.cancelHighlightTrailing();
+        this.runHighlightRefresh();
+        return;
+      }
+      this.cancelHighlightTrailing();
+      this.hlTrailingWindow = win;
+      this.hlTrailingTimer = win.setTimeout(() => {
+        this.hlTrailingTimer = null;
+        this.hlTrailingWindow = null;
+        this.runHighlightRefresh();
+      }, SCROLL_HIGHLIGHT_MIN_INTERVAL_MS - since);
+    });
+  }
+  runHighlightRefresh() {
+    const win = getViewWindow(this.view);
+    const perf = win.performance || (typeof performance !== "undefined" ? performance : null);
+    this.lastHlRefreshAt = perf ? perf.now() : Date.now();
+    this.refreshHighlights(this.highlightToken, { fromScroll: true });
+  }
+  cancelHighlightTrailing() {
+    if (this.hlTrailingTimer == null) return;
+    const win = this.hlTrailingWindow || getViewWindow(this.view);
+    win.clearTimeout(this.hlTrailingTimer);
+    this.hlTrailingTimer = null;
+    this.hlTrailingWindow = null;
+  }
+  cancelHighlightRefresh() {
+    if (this.hlFrame != null) {
+      const win = getViewWindow(this.view);
+      win.cancelAnimationFrame(this.hlFrame);
+      this.hlFrame = null;
+    }
+    this.cancelHighlightTrailing();
   }
   refreshCurrentSearch(options = {}) {
     if (!this.barEl) return;
@@ -3153,10 +3169,7 @@ var FindBar = class {
       }
     };
     this.input.addEventListener("keydown", this.onKeydown);
-    this.onScroll = throttle(
-      () => this.refreshHighlights(this.highlightToken, { fromScroll: true }),
-      SCROLL_HIGHLIGHT_THROTTLE_MS
-    );
+    this.onScroll = () => this.scheduleHighlightRefresh();
     this.updateScroller();
     this.updateRenderObserver();
     this.lastViewMode = this.viewModeKey();
@@ -3198,7 +3211,7 @@ var FindBar = class {
   }
   close() {
     if (this.onInput && this.onInput.cancel) this.onInput.cancel();
-    if (this.onScroll && this.onScroll.cancel) this.onScroll.cancel();
+    this.cancelHighlightRefresh();
     if (this.onEditorChange && this.onEditorChange.cancel)
       this.onEditorChange.cancel();
     if (this.input && this.onInput) {
