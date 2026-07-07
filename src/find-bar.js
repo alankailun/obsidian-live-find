@@ -1,5 +1,5 @@
 import { MarkdownView, Menu, setIcon } from "obsidian";
-import { DEFAULT_FIND_OPTIONS, DEBOUNCE_MS, MAX_DOM_HIGHLIGHTS, debugWarn, debounce, headingLevelLabel, headingLevelMenuLabel, normalizeHeadingGroupLevel, throttleFrame } from "./constants.js";
+import { DEFAULT_FIND_OPTIONS, DEBOUNCE_MS, DOM_HIGHLIGHT_VIEWPORT_MARGIN, MAX_DOM_HIGHLIGHTS, SCROLL_HIGHLIGHT_THROTTLE_MS, debugWarn, debounce, headingLevelLabel, headingLevelMenuLabel, normalizeHeadingGroupLevel, throttle } from "./constants.js";
 import { buildMatcher, findSourceMatches, normalizePlainQuery } from "./matcher.js";
 import { buildTableLookup, isDelimiterRow, locateInTables } from "./tables.js";
 import { buildHeadingLookup, cleanHeadingText, cleanSnippet, headingGroupForLine, headingGroupKey, hiddenSpansInReading, isInsideSpan, nearestHeading } from "./markdown.js";
@@ -36,6 +36,10 @@ export class FindBar {
     this.docCache = null;
     this.perfStats = {};
     this.perfSeq = 0;
+    this.renderObserver = null;
+    this.observedRenderRoot = null;
+    this.mutationFrame = null;
+    this.mutationWindow = null;
     this.barEl = null;
     this.resultsEl = null;
   }
@@ -148,6 +152,76 @@ export class FindBar {
     if (this.scroller && this.onScroll) {
       this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
     }
+  }
+
+  updateRenderObserver() {
+    this.disconnectRenderObserver();
+    if (!this.barEl) return;
+
+    const root = getRenderRoot(this.view);
+    if (!root) return;
+
+    const win = getElementWindow(root);
+    if (!win || typeof win.MutationObserver !== "function") return;
+
+    this.observedRenderRoot = root;
+    this.renderObserver = new win.MutationObserver((mutations) => {
+      const hasNoteMutation = mutations.some((mutation) => {
+        const target = mutation.target;
+        const el =
+          target && target.nodeType === 1 ? target : target && target.parentElement;
+        return !(
+          el &&
+          el.closest &&
+          el.closest(".lf-find-bar, .lf-results")
+        );
+      });
+      if (!hasNoteMutation) return;
+      this.scheduleRenderedDomRefresh();
+    });
+    this.renderObserver.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
+
+  disconnectRenderObserver() {
+    if (this.renderObserver) this.renderObserver.disconnect();
+    this.renderObserver = null;
+    this.observedRenderRoot = null;
+    this.cancelRenderedDomRefresh();
+  }
+
+  scheduleRenderedDomRefresh() {
+    if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
+      return;
+    if (this.mutationFrame != null) return;
+
+    const root = this.observedRenderRoot || getRenderRoot(this.view);
+    const win = root ? getElementWindow(root) : getElementWindow(this.barEl);
+    this.mutationWindow = win;
+    this.mutationFrame = win.requestAnimationFrame(() => {
+      this.mutationFrame = null;
+      this.mutationWindow = null;
+      this.refreshHighlights(this.highlightToken, {
+        fromScroll: true,
+        viewportOnly: true,
+      });
+    });
+  }
+
+  cancelRenderedDomRefresh() {
+    if (this.mutationFrame == null) return;
+    const win =
+      this.mutationWindow ||
+      (this.observedRenderRoot ? getElementWindow(this.observedRenderRoot) : null) ||
+      (this.barEl ? getElementWindow(this.barEl) : null);
+    if (win && typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(this.mutationFrame);
+    }
+    this.mutationFrame = null;
+    this.mutationWindow = null;
   }
 
   refreshCurrentSearch(options = {}) {
@@ -389,8 +463,8 @@ export class FindBar {
       getCurrent: () => this.current,
       getGroupInfo: () => this.getMatchGroupInfo(),
       onAfterRender: () => this.updateGroupCounts(),
-      renderRow: (index, groupInfo, state) =>
-        this.createResultRow(index, groupInfo, state),
+      renderRow: (index, groupInfo, state, parent) =>
+        this.createResultRow(index, groupInfo, state, parent),
     });
     this.updateCount(); // collapse the empty count/separator on open
 
@@ -437,10 +511,12 @@ export class FindBar {
     };
     this.input.addEventListener("keydown", this.onKeydown);
 
-    this.onScroll = throttleFrame(
-      () => this.refreshHighlights(this.highlightToken, { fromScroll: true })
+    this.onScroll = throttle(
+      () => this.refreshHighlights(this.highlightToken, { fromScroll: true }),
+      SCROLL_HIGHLIGHT_THROTTLE_MS
     );
     this.updateScroller();
+    this.updateRenderObserver();
 
     // Re-run search when the user toggles Source / Live Preview / Reading
     // inside the same tab, so domMode, highlights and snippets stay accurate.
@@ -451,6 +527,7 @@ export class FindBar {
       if (mode === this.lastViewMode) return;
       this.lastViewMode = mode;
       this.updateScroller();
+      this.updateRenderObserver();
       this.refreshCurrentSearch({ preserveCurrent: true });
     });
 
@@ -505,6 +582,7 @@ export class FindBar {
       this.scroller.removeEventListener("scroll", this.onScroll);
     }
     this.scroller = null;
+    this.disconnectRenderObserver();
     if (this.resultList) this.resultList.destroy();
     this.resultList = null;
 
@@ -581,7 +659,7 @@ export class FindBar {
 
       const domOptions =
         fromScroll || options.viewportOnly
-          ? { scroller, viewportMargin: 3000 }
+          ? { scroller, viewportMargin: DOM_HIGHLIGHT_VIEWPORT_MARGIN }
           : {};
 
       let dom = findRenderedMatches(root, this.matcher, domOptions);
@@ -643,7 +721,9 @@ export class FindBar {
           );
         if (!currentRange) currentRange = resolveByDomAtPos(cm, off, this.matcher);
         if (!currentRange) {
-          const domOptions = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3000 } : {};
+          const domOptions = fromScroll || options.viewportOnly
+            ? { scroller, viewportMargin: DOM_HIGHLIGHT_VIEWPORT_MARGIN }
+            : {};
           dom = findRenderedMatches(root, this.matcher, domOptions);
           let coords = null;
           try {
@@ -671,7 +751,9 @@ export class FindBar {
       }
     }
 
-    const domOptions = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3000 } : {};
+    const domOptions = fromScroll || options.viewportOnly
+      ? { scroller, viewportMargin: DOM_HIGHLIGHT_VIEWPORT_MARGIN }
+      : {};
     if (!dom) dom = findRenderedMatches(root, this.matcher, domOptions);
     this.currentDomRange = currentRange;
     dom = limitDomHighlightsAroundCurrent(
@@ -920,14 +1002,19 @@ export class FindBar {
     this.resultList.setItems(this.matches.length, this.current);
   }
 
-  createResultRow(i, groupInfo, state) {
-    const el = this.resultsEl;
+  createResultRow(i, groupInfo, state, parent = null) {
+    const el = parent || this.resultsEl;
     if (!el) return null;
+    state = state || {};
 
     const m = this.matches[i];
     const groupItem = groupInfo ? groupInfo.items[i] : null;
     const group = groupItem ? groupItem.group : null;
-    if (groupItem && groupItem.key !== state.lastGroupKey) {
+    if (
+      groupItem &&
+      groupItem.key !== state.lastGroupKey &&
+      !(state && state.suppressGroupHeader)
+    ) {
       state.lastGroupKey = groupItem.key;
       const groupEl = el.createDiv({ cls: "lf-group" });
       groupEl.dataset.groupKey = groupItem.key;

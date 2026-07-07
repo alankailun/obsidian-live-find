@@ -5,6 +5,8 @@ export const HL_CURRENT = "live-find-current";
 // reasonable defaults — adjust here if you ever need to tune them.
 export const DEBUG = false;
 export const DEBOUNCE_MS = 100;
+export const SCROLL_HIGHLIGHT_THROTTLE_MS = 150;
+export const DOM_HIGHLIGHT_VIEWPORT_MARGIN = 6000;
 export const MAX_DOM_HIGHLIGHTS = 2500;
 export const RESULT_RENDER_BATCH = 150;
 export const RESULT_RENDER_AHEAD_PX = 900;
@@ -90,6 +92,46 @@ export function debounce(fn, ms) {
     clearTimeout(t);
     t = null;
   };
+  return wrapped;
+}
+
+export function throttle(fn, ms) {
+  let last = 0;
+  let timer = null;
+  let pendingArgs = null;
+
+  const run = (args) => {
+    last = Date.now();
+    timer = null;
+    pendingArgs = null;
+    fn(...args);
+  };
+
+  const wrapped = (...args) => {
+    const now = Date.now();
+    const remaining = ms - (now - last);
+    pendingArgs = args;
+
+    if (remaining <= 0 || remaining > ms) {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      run(args);
+      return;
+    }
+
+    if (timer == null) {
+      timer = setTimeout(() => run(pendingArgs || []), remaining);
+    }
+  };
+
+  wrapped.cancel = () => {
+    if (timer != null) clearTimeout(timer);
+    timer = null;
+    pendingArgs = null;
+  };
+
   return wrapped;
 }
 

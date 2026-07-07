@@ -118,6 +118,43 @@
   overflow-anchor: none;
 }
 
+.lf-results .lf-virtual-inner {
+  position: relative;
+  min-height: 100%;
+}
+
+.lf-results .lf-virtual-item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  will-change: transform;
+}
+
+.lf-results .lf-virtual-sticky-group {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.lf-results .lf-virtual-sticky-group.is-hidden {
+  display: none;
+}
+
+.lf-results .lf-virtual-sticky-group .lf-group,
+.lf-results .lf-virtual-item .lf-group {
+  position: relative;
+  top: auto;
+}
+
+.lf-results .lf-virtual-sticky-group .lf-group {
+  pointer-events: auto;
+}
+
 .lf-results .lf-row {
   display: flex;
   flex-direction: column;

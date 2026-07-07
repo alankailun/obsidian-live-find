@@ -1,11 +1,57 @@
 import {
-  DEFAULT_RESULT_ROW_HEIGHT,
-  RESULT_DISPLAY_CAP,
-  RESULT_IDLE_PREFETCH_BATCH,
-  RESULT_RENDER_AHEAD_PX,
-  RESULT_RENDER_BATCH,
-} from "./constants.js";
-import { getElementWindow } from "./dom-resolve.js";
+  Virtualizer,
+  elementScroll,
+  measureElement,
+  observeElementOffset,
+  observeElementRect,
+} from "@tanstack/virtual-core";
+import { DEFAULT_RESULT_ROW_HEIGHT } from "./constants.js";
+
+const GROUP_ROW_HEIGHT = 30;
+const RESULT_OVERSCAN = 10;
+
+function emptyElement(el) {
+  if (!el) return;
+  if (typeof el.empty === "function") el.empty();
+  else el.textContent = "";
+}
+
+function createDiv(parent, cls) {
+  if (typeof parent.createDiv === "function") return parent.createDiv({ cls });
+  const el = parent.ownerDocument.createElement("div");
+  el.className = cls;
+  parent.appendChild(el);
+  return el;
+}
+
+function createSpan(parent, cls, text) {
+  if (typeof parent.createSpan === "function")
+    return parent.createSpan({ cls, text });
+  const el = parent.ownerDocument.createElement("span");
+  el.className = cls;
+  el.textContent = text;
+  parent.appendChild(el);
+  return el;
+}
+
+function setText(el, text) {
+  if (!el) return;
+  if (typeof el.setText === "function") el.setText(text);
+  else el.textContent = text;
+}
+
+function setClass(el, cls, on) {
+  if (!el) return;
+  if (typeof el.toggleClass === "function") el.toggleClass(cls, on);
+  else el.classList.toggle(cls, on);
+}
+
+function scrollAlignFromBlock(block) {
+  if (block === "center") return "center";
+  if (block === "start") return "start";
+  if (block === "end") return "end";
+  return "auto";
+}
 
 export class VirtualResultList {
   constructor({ container, getCurrent, getGroupInfo, onAfterRender, renderRow }) {
@@ -16,357 +62,146 @@ export class VirtualResultList {
     this.renderRow = renderRow;
 
     this.itemCount = 0;
-    this.renderLimit = RESULT_RENDER_BATCH;
-    this.renderedCount = 0;
-    this.renderedGroupKey = null;
+    this.rows = [];
+    this.matchRowByIndex = new Map();
+    this.groupInfo = null;
+    this.innerEl = null;
+    this.stickyEl = null;
+    this.renderedItems = new Map();
     this.activeRow = null;
-    this.observer = null;
-    this.sentinelEl = null;
-    this.spacerEl = null;
-    this.moreBtnEl = null;
-    this.displayLimit = 0;
-    this.averageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
-    this.renderToken = 0;
-    this.scrollFrame = null;
-    this.scrollWindow = null;
-    this.prefetchId = null;
-    this.prefetchKind = null;
-    this.prefetchWindow = null;
-    this.catchupFrame = null;
-    this.catchupWindow = null;
-    this.onScroll = null;
+    this.renderFrame = null;
+    this.cleanupVirtualizer = null;
 
-    this.setupObserver();
+    this.virtualizer = new Virtualizer(this.virtualizerOptions(0));
+    this.cleanupVirtualizer = this.virtualizer._didMount();
+    this.virtualizer._willUpdate();
   }
 
   destroy() {
-    this.disconnectObserver();
-    this.cancelPrefetch();
-    this.cancelCatchup();
-    this.cancelScrollCheck();
-    this.clearTail();
-    if (this.el) this.el.empty();
+    this.cancelRender();
+    if (this.cleanupVirtualizer) this.cleanupVirtualizer();
+    this.cleanupVirtualizer = null;
+    this.virtualizer = null;
+    this.clearDom();
     this.el = null;
-    this.itemCount = 0;
+    this.rows = [];
+    this.matchRowByIndex = new Map();
     this.activeRow = null;
   }
 
   clear() {
-    this.renderToken += 1;
-    this.cancelPrefetch();
-    this.cancelCatchup();
-    this.cancelScrollCheck();
-    this.clearTail();
-    if (this.el) this.el.empty();
-    this.renderLimit = RESULT_RENDER_BATCH;
-    this.renderedCount = 0;
-    this.renderedGroupKey = null;
+    this.cancelRender();
+    this.itemCount = 0;
+    this.rows = [];
+    this.matchRowByIndex = new Map();
+    this.groupInfo = null;
     this.activeRow = null;
-    this.displayLimit = 0;
-    this.averageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
+    this.clearDom();
+    this.configureVirtualizer(0);
   }
 
   setItems(itemCount, activeIndex) {
-    const el = this.el;
-    if (!el) return;
-    this.clear();
+    this.cancelRender();
     this.itemCount = Math.max(0, Number(itemCount) || 0);
-    if (!this.itemCount) return;
+    this.rebuildRows();
+    this.activeRow = null;
+    this.clearDom();
+    if (!this.itemCount || !this.rows.length) {
+      this.configureVirtualizer(0);
+      return;
+    }
 
-    el.scrollTop = 0;
-    this.displayLimit = Math.min(this.itemCount, RESULT_DISPLAY_CAP);
-    this.ensureCapCovers(activeIndex);
-    this.renderLimit = Math.min(
-      this.displayLimit || this.itemCount,
-      Math.max(RESULT_RENDER_BATCH, activeIndex + 1)
-    );
-    this.renderChunk(this.renderLimit);
+    this.createDom();
+    this.configureVirtualizer(this.rows.length);
+    if (this.virtualizer) this.virtualizer.measure();
+    this.scheduleRender();
     this.setActive(activeIndex, { block: "center" });
-    this.schedulePrefetch();
   }
 
-  ensureCapCovers(index) {
-    if (index == null || index < 0) return;
-    if (index < this.displayLimit) return;
-    const steps = Math.ceil((index + 1) / RESULT_DISPLAY_CAP);
-    this.displayLimit = Math.min(this.itemCount, steps * RESULT_DISPLAY_CAP);
-  }
-
-  renderChunk(targetCount) {
-    const el = this.el;
-    if (!el || !this.itemCount) return false;
-
-    const groupInfo = this.getGroupInfo ? this.getGroupInfo() : null;
-    const start = this.renderedCount || 0;
-    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    const end = Math.min(limit, targetCount);
-    if (end <= start) return false;
-
-    const keepScrollTop = el.scrollTop;
-    this.clearTail();
-
-    const state = { lastGroupKey: this.renderedGroupKey };
-    const activeIndex = this.current();
-    for (let i = start; i < end; i++) {
-      const row = this.renderRow ? this.renderRow(i, groupInfo, state) : null;
-      if (row && i === activeIndex) {
-        row.addClass("is-active");
-        this.activeRow = row;
-      }
-    }
-
-    this.renderedCount = end;
-    this.renderedGroupKey = state.lastGroupKey;
-    this.updateAverageHeight(el.scrollHeight, this.renderedCount);
-    this.updateTail();
-    el.scrollTop = keepScrollTop;
-    return true;
-  }
-
-  ensureRendered(index) {
-    if (index < 0 || index >= this.itemCount) return false;
-    if (index < (this.renderedCount || 0)) return true;
-    this.ensureCapCovers(index);
-    this.renderLimit = Math.min(
-      this.displayLimit || this.itemCount,
-      Math.max(index + 1, (this.renderedCount || 0) + RESULT_RENDER_BATCH)
-    );
-    const changed = this.renderChunk(this.renderLimit);
-    if (changed && this.onAfterRender) this.onAfterRender();
-    return index < (this.renderedCount || 0);
-  }
-
-  setupObserver() {
-    const el = this.el;
-    if (!el) return;
-    this.disconnectObserver();
-
-    this.onScroll = () => this.scheduleScrollCheck();
-    el.addEventListener("scroll", this.onScroll, { passive: true });
-
-    const win = getElementWindow(el);
-    if (win && typeof win.IntersectionObserver === "function") {
-      this.observer = new win.IntersectionObserver(
-        (entries) => {
-          if (entries.some((entry) => entry.isIntersecting)) {
-            this.maybeRenderMore({ force: true });
-          }
-        },
-        {
-          root: el,
-          rootMargin: `0px 0px ${RESULT_RENDER_AHEAD_PX}px 0px`,
-          threshold: 0,
-        }
-      );
-    }
-  }
-
-  disconnectObserver() {
-    if (this.observer) this.observer.disconnect();
-    this.observer = null;
-    this.cancelScrollCheck();
-
-    if (this.el && this.onScroll) {
-      this.el.removeEventListener("scroll", this.onScroll);
-    }
-    this.onScroll = null;
-    this.sentinelEl = null;
-    this.spacerEl = null;
-    this.moreBtnEl = null;
-  }
-
-  scheduleScrollCheck() {
-    const el = this.el;
-    if (!el || this.scrollFrame != null) return;
-    const win = getElementWindow(el);
-    this.scrollWindow = win;
-    this.scrollFrame = win.requestAnimationFrame(() => {
-      this.scrollFrame = null;
-      this.scrollWindow = null;
-      this.maybeRenderMore();
-    });
-  }
-
-  cancelScrollCheck() {
-    if (this.scrollFrame == null) return;
-    const win = this.scrollWindow || (this.el ? getElementWindow(this.el) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.scrollFrame);
-    }
-    this.scrollFrame = null;
-    this.scrollWindow = null;
-  }
-
-  clearTail() {
-    if (this.sentinelEl) {
-      if (this.observer) this.observer.unobserve(this.sentinelEl);
-      this.sentinelEl.remove();
-      this.sentinelEl = null;
-    }
-    if (this.spacerEl) {
-      this.spacerEl.remove();
-      this.spacerEl = null;
-    }
-    if (this.moreBtnEl) {
-      this.moreBtnEl.remove();
-      this.moreBtnEl = null;
-    }
-  }
-
-  updateAverageHeight(totalRowsHeight, renderedCount) {
-    if (renderedCount <= 0 || totalRowsHeight <= 0) return;
-    const sample = totalRowsHeight / renderedCount;
-    if (!Number.isFinite(sample) || sample < 12) return;
-    this.averageRowHeight = sample;
-  }
-
-  updateTail() {
-    const el = this.el;
-    if (!el || !this.itemCount) return;
-    this.clearTail();
-
-    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    const rendered = this.renderedCount || 0;
-
-    if (rendered < limit) {
-      this.sentinelEl = el.createDiv({ cls: "lf-sentinel" });
-      if (this.observer) this.observer.observe(this.sentinelEl);
-      this.spacerEl = el.createDiv({ cls: "lf-spacer" });
-      this.spacerEl.style.height = `${Math.max(
-        0,
-        Math.round(
-          (limit - rendered) *
-            (this.averageRowHeight || DEFAULT_RESULT_ROW_HEIGHT)
-        )
-      )}px`;
-    }
-
-    if (limit < this.itemCount) {
-      this.moreBtnEl = el.createEl("button", { cls: "lf-btn lf-more-btn" });
-      this.moreBtnEl.setText(`Show more (${this.itemCount - limit} hidden)`);
-      this.moreBtnEl.onclick = () => this.expandCap();
-    }
-  }
-
-  expandCap() {
-    if (!this.el || this.displayLimit >= this.itemCount) return;
-    this.displayLimit = Math.min(
-      this.itemCount,
-      this.displayLimit + RESULT_DISPLAY_CAP
-    );
-    this.renderLimit = Math.max(
-      this.renderLimit || RESULT_RENDER_BATCH,
-      (this.renderedCount || 0) + RESULT_RENDER_BATCH
-    );
-    if (!this.renderChunk(this.renderLimit)) this.updateTail();
-    if (this.onAfterRender) this.onAfterRender();
-    this.schedulePrefetch();
-  }
-
-  isNearBottom() {
-    const el = this.el;
-    if (!el) return false;
-    const tailTop = this.sentinelEl ? this.sentinelEl.offsetTop : el.scrollHeight;
-    return el.scrollTop + el.clientHeight >= tailTop - RESULT_RENDER_AHEAD_PX;
-  }
-
-  maybeRenderMore(options = {}) {
-    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    if (!this.el || !this.itemCount || (this.renderedCount || 0) >= limit) return;
-    if (!options.force && !this.isNearBottom()) return;
-
-    this.renderLimit = Math.min(
-      limit,
-      Math.max(
-        this.renderLimit || RESULT_RENDER_BATCH,
-        (this.renderedCount || 0) + RESULT_RENDER_BATCH
-      )
-    );
-    if (this.renderChunk(this.renderLimit)) {
-      if (this.onAfterRender) this.onAfterRender();
-      this.schedulePrefetch();
-      if (this.isNearBottom()) this.scheduleCatchup();
-    }
-  }
-
-  schedulePrefetch() {
-    const el = this.el;
-    if (!el || this.prefetchId != null || !this.itemCount) return;
-
-    const cap = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    if ((this.renderedCount || 0) >= cap) return;
-
-    const win = getElementWindow(el);
-    const token = this.renderToken;
-    const run = () => {
-      this.prefetchId = null;
-      this.prefetchKind = null;
-      this.prefetchWindow = null;
-
-      if (token !== this.renderToken || !this.el || !this.itemCount) return;
-
-      const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-      if ((this.renderedCount || 0) >= limit) return;
-
-      const scrollTop = this.el.scrollTop;
-      const target = Math.min(
-        limit,
-        (this.renderedCount || 0) + RESULT_IDLE_PREFETCH_BATCH
-      );
-      if (this.renderChunk(target)) {
-        this.el.scrollTop = scrollTop;
-        if (this.onAfterRender) this.onAfterRender();
-      }
-      this.schedulePrefetch();
+  virtualizerOptions(count) {
+    return {
+      count,
+      getScrollElement: () => this.el,
+      estimateSize: (index) => this.estimateSize(index),
+      getItemKey: (index) => this.rowKey(index),
+      overscan: RESULT_OVERSCAN,
+      observeElementRect,
+      observeElementOffset,
+      scrollToFn: elementScroll,
+      measureElement,
+      onChange: () => this.scheduleRender(),
+      initialRect: {
+        width: this.el ? this.el.clientWidth || 340 : 340,
+        height: this.el ? this.el.clientHeight || 320 : 320,
+      },
     };
-
-    if (win && typeof win.requestIdleCallback === "function") {
-      this.prefetchKind = "idle";
-      this.prefetchId = win.requestIdleCallback(run, { timeout: 350 });
-    } else {
-      this.prefetchKind = "timeout";
-      this.prefetchId = win.setTimeout(run, 80);
-    }
-    this.prefetchWindow = win;
   }
 
-  cancelPrefetch() {
-    if (this.prefetchId == null) return;
-    const win = this.prefetchWindow || (this.el ? getElementWindow(this.el) : null);
-    if (
-      this.prefetchKind === "idle" &&
-      win &&
-      typeof win.cancelIdleCallback === "function"
-    ) {
-      win.cancelIdleCallback(this.prefetchId);
-    } else if (win && typeof win.clearTimeout === "function") {
-      win.clearTimeout(this.prefetchId);
-    }
-    this.prefetchId = null;
-    this.prefetchKind = null;
-    this.prefetchWindow = null;
+  configureVirtualizer(count) {
+    if (!this.virtualizer) return;
+    this.virtualizer.setOptions(this.virtualizerOptions(count));
+    this.virtualizer._willUpdate();
   }
 
-  scheduleCatchup() {
-    const el = this.el;
-    if (!el || this.catchupFrame != null) return;
-    const win = getElementWindow(el);
-    this.catchupWindow = win;
-    this.catchupFrame = win.requestAnimationFrame(() => {
-      this.catchupFrame = null;
-      this.catchupWindow = null;
-      this.maybeRenderMore();
-    });
+  rebuildRows() {
+    this.rows = [];
+    this.matchRowByIndex = new Map();
+    this.groupInfo = this.getGroupInfo ? this.getGroupInfo() : null;
+
+    let lastGroupKey = null;
+    for (let i = 0; i < this.itemCount; i++) {
+      const groupItem =
+        this.groupInfo && this.groupInfo.items ? this.groupInfo.items[i] : null;
+      if (groupItem && groupItem.key !== lastGroupKey) {
+        lastGroupKey = groupItem.key;
+        this.rows.push({
+          type: "group",
+          key: groupItem.key,
+          group: groupItem.group,
+          totalInGroup: groupItem.totalInGroup,
+        });
+      }
+
+      const rowIndex = this.rows.length;
+      this.matchRowByIndex.set(i, rowIndex);
+      this.rows.push({
+        type: "match",
+        key: `match:${i}`,
+        matchIndex: i,
+        groupKey: groupItem ? groupItem.key : null,
+      });
+    }
   }
 
-  cancelCatchup() {
-    if (this.catchupFrame == null) return;
-    const win = this.catchupWindow || (this.el ? getElementWindow(this.el) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.catchupFrame);
-    }
-    this.catchupFrame = null;
-    this.catchupWindow = null;
+  createDom() {
+    if (!this.el) return;
+    this.stickyEl = createDiv(this.el, "lf-virtual-sticky-group is-hidden");
+    this.innerEl = createDiv(this.el, "lf-virtual-inner");
+  }
+
+  clearDom() {
+    if (!this.el) return;
+    this.renderedItems.clear();
+    this.innerEl = null;
+    this.stickyEl = null;
+    emptyElement(this.el);
+    if (this.virtualizer) this.virtualizer.measureElement(null);
+  }
+
+  estimateSize(index) {
+    const row = this.rows[index];
+    return row && row.type === "group" ? GROUP_ROW_HEIGHT : DEFAULT_RESULT_ROW_HEIGHT;
+  }
+
+  rowKey(index) {
+    const row = this.rows[index];
+    if (!row) return `row:${index}`;
+    return row.type === "group" ? `group:${row.key}` : row.key;
+  }
+
+  rowIndexForMatch(matchIndex) {
+    const rowIndex = this.matchRowByIndex.get(matchIndex);
+    return Number.isFinite(rowIndex) ? rowIndex : -1;
   }
 
   current() {
@@ -374,27 +209,170 @@ export class VirtualResultList {
     return Number.isFinite(current) ? current : -1;
   }
 
-  setActive(index, options = {}) {
-    if (!this.el) return;
-    const shouldScroll = options.scroll !== false;
-    this.ensureRendered(index);
-    const previous =
-      this.activeRow && this.activeRow.isConnected ? this.activeRow : null;
-    const row =
-      index >= 0
-        ? this.el.querySelector(`.lf-row[data-match-index="${index}"]`)
-        : null;
-    if (previous && previous !== row) previous.classList.remove("is-active");
-    if (row) {
-      row.classList.add("is-active");
-      if (shouldScroll) {
-        row.scrollIntoView({
-          block: options.block || "nearest",
-          inline: "nearest",
-        });
+  scheduleRender() {
+    const el = this.el;
+    if (!el || this.renderFrame != null) return;
+    const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+    this.renderFrame = win.requestAnimationFrame(() => {
+      this.renderFrame = null;
+      this.render();
+    });
+  }
+
+  cancelRender() {
+    if (this.renderFrame == null || !this.el) {
+      this.renderFrame = null;
+      return;
+    }
+    const win = (this.el.ownerDocument && this.el.ownerDocument.defaultView) || window;
+    win.cancelAnimationFrame(this.renderFrame);
+    this.renderFrame = null;
+  }
+
+  render() {
+    if (!this.el || !this.innerEl || !this.virtualizer) return;
+
+    const virtualItems = this.virtualizer.getVirtualItems();
+    const totalSize = this.virtualizer.getTotalSize();
+    this.innerEl.style.height = `${Math.max(0, totalSize)}px`;
+
+    const liveKeys = new Set();
+    for (const virtualRow of virtualItems) {
+      const key = String(virtualRow.key);
+      liveKeys.add(key);
+      let itemEl = this.renderedItems.get(key);
+      if (!itemEl) {
+        itemEl = createDiv(this.innerEl, "lf-virtual-item");
+        this.renderedItems.set(key, itemEl);
+      }
+
+      itemEl.dataset.index = String(virtualRow.index);
+      itemEl.style.transform = `translateY(${virtualRow.start}px)`;
+      if (itemEl.dataset.rowKey !== key) {
+        itemEl.dataset.rowKey = key;
+        this.renderVirtualRow(itemEl, virtualRow.index);
+      }
+      this.virtualizer.measureElement(itemEl);
+    }
+
+    for (const [key, itemEl] of this.renderedItems) {
+      if (liveKeys.has(key)) continue;
+      itemEl.remove();
+      this.renderedItems.delete(key);
+    }
+    this.virtualizer.measureElement(null);
+
+    this.updateStickyGroup(virtualItems);
+    this.applyActiveClass(false);
+    if (this.onAfterRender) this.onAfterRender();
+  }
+
+  renderVirtualRow(itemEl, rowIndex) {
+    const row = this.rows[rowIndex];
+    emptyElement(itemEl);
+    if (!row) return;
+
+    if (row.type === "group") {
+      this.renderGroup(itemEl, row);
+      return;
+    }
+
+    const state = {
+      lastGroupKey: row.groupKey,
+      suppressGroupHeader: true,
+    };
+    const rendered = this.renderRow
+      ? this.renderRow(row.matchIndex, this.groupInfo, state, itemEl)
+      : null;
+    if (rendered && row.matchIndex === this.current()) {
+      rendered.addClass ? rendered.addClass("is-active") : rendered.classList.add("is-active");
+      this.activeRow = rendered;
+    }
+  }
+
+  renderGroup(parent, row) {
+    const groupEl = createDiv(parent, "lf-group");
+    groupEl.dataset.groupKey = row.key;
+    groupEl.dataset.groupTitle = row.group ? row.group.text : "";
+    groupEl.dataset.groupTotal = String(row.totalInGroup || 0);
+    createSpan(groupEl, "lf-group-title", row.group ? row.group.text : "No heading");
+    createSpan(groupEl, "lf-group-count", String(row.totalInGroup || 0));
+  }
+
+  updateStickyGroup(virtualItems) {
+    if (!this.stickyEl) return;
+    if (!this.groupInfo || !this.rows.length || !virtualItems.length) {
+      setClass(this.stickyEl, "is-hidden", true);
+      emptyElement(this.stickyEl);
+      return;
+    }
+
+    const first = virtualItems[0];
+    const scrollOffset = this.virtualizer ? this.virtualizer.scrollOffset || 0 : 0;
+    const firstRow = this.rows[first.index];
+    if (
+      firstRow &&
+      firstRow.type === "group" &&
+      Math.abs(first.start - scrollOffset) < 4
+    ) {
+      setClass(this.stickyEl, "is-hidden", true);
+      emptyElement(this.stickyEl);
+      return;
+    }
+
+    let groupRow = null;
+    for (let i = first.index; i >= 0; i--) {
+      const row = this.rows[i];
+      if (row && row.type === "group") {
+        groupRow = row;
+        break;
       }
     }
+
+    if (!groupRow) {
+      setClass(this.stickyEl, "is-hidden", true);
+      emptyElement(this.stickyEl);
+      return;
+    }
+
+    emptyElement(this.stickyEl);
+    this.renderGroup(this.stickyEl, groupRow);
+    setClass(this.stickyEl, "is-hidden", false);
+  }
+
+  applyActiveClass(scroll) {
+    if (!this.el) return;
+    const current = this.current();
+    const row =
+      current >= 0
+        ? this.el.querySelector(`.lf-row[data-match-index="${current}"]`)
+        : null;
+    if (this.activeRow && this.activeRow !== row && this.activeRow.isConnected) {
+      this.activeRow.classList.remove("is-active");
+    }
+    if (row) row.classList.add("is-active");
     this.activeRow = row || null;
+    if (scroll && row) {
+      row.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }
+
+  setActive(index, options = {}) {
+    if (!this.el || !this.virtualizer) return;
+    const rowIndex = this.rowIndexForMatch(index);
+    if (rowIndex < 0) {
+      this.applyActiveClass(false);
+      if (this.onAfterRender) this.onAfterRender();
+      return;
+    }
+
+    if (options.scroll !== false) {
+      this.virtualizer.scrollToIndex(rowIndex, {
+        align: scrollAlignFromBlock(options.block),
+      });
+    }
+    this.scheduleRender();
+    this.applyActiveClass(false);
     if (this.onAfterRender) this.onAfterRender();
   }
 }

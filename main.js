@@ -29,11 +29,9 @@ var HL_ALL = "live-find-all";
 var HL_CURRENT = "live-find-current";
 var DEBUG = false;
 var DEBOUNCE_MS = 100;
+var SCROLL_HIGHLIGHT_THROTTLE_MS = 150;
+var DOM_HIGHLIGHT_VIEWPORT_MARGIN = 6e3;
 var MAX_DOM_HIGHLIGHTS = 2500;
-var RESULT_RENDER_BATCH = 150;
-var RESULT_RENDER_AHEAD_PX = 900;
-var RESULT_IDLE_PREFETCH_BATCH = 75;
-var RESULT_DISPLAY_CAP = 5e3;
 var DEFAULT_RESULT_ROW_HEIGHT = 42;
 var SELECTORS = {
   readingRoot: ".markdown-reading-view, .markdown-preview-view",
@@ -89,16 +87,38 @@ function debounce(fn, ms) {
   };
   return wrapped;
 }
-function throttleFrame(fn) {
-  let queued = false;
-  return (...args) => {
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(() => {
-      queued = false;
-      fn(...args);
-    });
+function throttle(fn, ms) {
+  let last = 0;
+  let timer = null;
+  let pendingArgs = null;
+  const run = (args) => {
+    last = Date.now();
+    timer = null;
+    pendingArgs = null;
+    fn(...args);
   };
+  const wrapped = (...args) => {
+    const now = Date.now();
+    const remaining = ms - (now - last);
+    pendingArgs = args;
+    if (remaining <= 0 || remaining > ms) {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      run(args);
+      return;
+    }
+    if (timer == null) {
+      timer = setTimeout(() => run(pendingArgs || []), remaining);
+    }
+  };
+  wrapped.cancel = () => {
+    if (timer != null) clearTimeout(timer);
+    timer = null;
+    pendingArgs = null;
+  };
+  return wrapped;
 }
 
 // src/find-bar.js
@@ -1050,7 +1070,1380 @@ function limitDomHighlightsAroundCurrent(dom, currentRange, max, scroller) {
   }).sort((a, b) => a.dist - b.dist || a.index - b.index).slice(0, n).sort((a, b) => a.index - b.index).map((x) => x.item);
 }
 
+// node_modules/@tanstack/virtual-core/dist/esm/lazy-measurements.js
+function createLazyMeasurementsView(count, flat, getItemKey) {
+  const cache = new Array(count);
+  return new Proxy(cache, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string") {
+        const c = prop.charCodeAt(0);
+        if (c >= 48 && c <= 57) {
+          const i = +prop;
+          if (Number.isInteger(i) && i >= 0 && i < count) {
+            let v = target[i];
+            if (!v) {
+              const s = flat[i * 2];
+              v = target[i] = {
+                index: i,
+                key: getItemKey(i),
+                start: s,
+                size: flat[i * 2 + 1],
+                end: s + flat[i * 2 + 1],
+                lane: 0
+              };
+            }
+            return v;
+          }
+        }
+        if (prop === "length") return count;
+      }
+      return Reflect.get(target, prop, receiver);
+    }
+  });
+}
+
+// node_modules/@tanstack/virtual-core/dist/esm/utils.js
+function memo(getDeps, fn, opts) {
+  var _a;
+  let deps = (_a = opts.initialDeps) != null ? _a : [];
+  let result;
+  let isInitial = true;
+  function memoizedFunction() {
+    var _a2;
+    const debugEnabled = process.env.NODE_ENV !== "production" && !!opts.key && !!((_a2 = opts.debug) == null ? void 0 : _a2.call(opts));
+    let depTime = 0;
+    if (debugEnabled) depTime = Date.now();
+    const newDeps = getDeps();
+    const depsChanged = newDeps.length !== deps.length || newDeps.some((dep, index) => deps[index] !== dep);
+    if (!depsChanged) {
+      return result;
+    }
+    deps = newDeps;
+    let resultTime = 0;
+    if (debugEnabled) resultTime = Date.now();
+    result = fn(...newDeps);
+    if (debugEnabled) {
+      const depEndTime = Math.round((Date.now() - depTime) * 100) / 100;
+      const resultEndTime = Math.round((Date.now() - resultTime) * 100) / 100;
+      const resultFpsPercentage = resultEndTime / 16;
+      const pad = (str, num) => {
+        str = String(str);
+        while (str.length < num) {
+          str = " " + str;
+        }
+        return str;
+      };
+      console.info(
+        `%c\u23F1 ${pad(resultEndTime, 5)} /${pad(depEndTime, 5)} ms`,
+        `
+            font-size: .6rem;
+            font-weight: bold;
+            color: hsl(${Math.max(
+          0,
+          Math.min(120 - 120 * resultFpsPercentage, 120)
+        )}deg 100% 31%);`,
+        opts == null ? void 0 : opts.key
+      );
+    }
+    if ((opts == null ? void 0 : opts.onChange) && !(isInitial && opts.skipInitialOnChange)) {
+      opts.onChange(result);
+    }
+    isInitial = false;
+    return result;
+  }
+  memoizedFunction.updateDeps = (newDeps) => {
+    deps = newDeps;
+  };
+  return memoizedFunction;
+}
+function notUndefined(value, msg) {
+  if (value === void 0) {
+    throw new Error(`Unexpected undefined${msg ? `: ${msg}` : ""}`);
+  } else {
+    return value;
+  }
+}
+var approxEqual = (a, b) => Math.abs(a - b) < 1.01;
+var debounce2 = (targetWindow, fn, ms) => {
+  let timeoutId;
+  return function(...args) {
+    targetWindow.clearTimeout(timeoutId);
+    timeoutId = targetWindow.setTimeout(() => fn.apply(this, args), ms);
+  };
+};
+
+// node_modules/@tanstack/virtual-core/dist/esm/index.js
+var _isIOSResult;
+var isIOSWebKit = () => {
+  if (_isIOSResult !== void 0) return _isIOSResult;
+  if (typeof navigator === "undefined") return _isIOSResult = false;
+  if (/iP(hone|od|ad)/.test(navigator.userAgent)) return _isIOSResult = true;
+  const mtp = navigator.maxTouchPoints;
+  return _isIOSResult = navigator.platform === "MacIntel" && mtp !== void 0 && mtp > 0;
+};
+var getRect = (element) => {
+  const { offsetWidth, offsetHeight } = element;
+  return { width: offsetWidth, height: offsetHeight };
+};
+var defaultKeyExtractor = (index) => index;
+var defaultRangeExtractor = (range) => {
+  const start = Math.max(range.startIndex - range.overscan, 0);
+  const end = Math.min(range.endIndex + range.overscan, range.count - 1);
+  const len = end - start + 1;
+  const arr = new Array(len);
+  for (let i = 0; i < len; i++) {
+    arr[i] = start + i;
+  }
+  return arr;
+};
+var observeElementRect = (instance, cb) => {
+  const element = instance.scrollElement;
+  if (!element) {
+    return;
+  }
+  const targetWindow = instance.targetWindow;
+  if (!targetWindow) {
+    return;
+  }
+  const handler = (rect) => {
+    const { width, height } = rect;
+    cb({ width: Math.round(width), height: Math.round(height) });
+  };
+  handler(getRect(element));
+  if (!targetWindow.ResizeObserver) {
+    return () => {
+    };
+  }
+  const observer = new targetWindow.ResizeObserver((entries) => {
+    const run = () => {
+      const entry = entries[0];
+      if (entry == null ? void 0 : entry.borderBoxSize) {
+        const box = entry.borderBoxSize[0];
+        if (box) {
+          handler({ width: box.inlineSize, height: box.blockSize });
+          return;
+        }
+      }
+      handler(getRect(element));
+    };
+    instance.options.useAnimationFrameWithResizeObserver ? requestAnimationFrame(run) : run();
+  });
+  observer.observe(element, { box: "border-box" });
+  return () => {
+    observer.unobserve(element);
+  };
+};
+var addEventListenerOptions = {
+  passive: true
+};
+var supportsScrollend = typeof window == "undefined" ? true : "onscrollend" in window;
+var observeOffset = (instance, cb, readOffset) => {
+  const element = instance.scrollElement;
+  if (!element) {
+    return;
+  }
+  const targetWindow = instance.targetWindow;
+  if (!targetWindow) {
+    return;
+  }
+  const registerScrollendEvent = instance.options.useScrollendEvent && supportsScrollend;
+  let offset = 0;
+  const fallback = registerScrollendEvent ? null : debounce2(
+    targetWindow,
+    () => cb(offset, false),
+    instance.options.isScrollingResetDelay
+  );
+  const createHandler = (isScrolling) => () => {
+    offset = readOffset(element);
+    fallback == null ? void 0 : fallback();
+    cb(offset, isScrolling);
+  };
+  const handler = createHandler(true);
+  const endHandler = createHandler(false);
+  element.addEventListener("scroll", handler, addEventListenerOptions);
+  if (registerScrollendEvent) {
+    element.addEventListener("scrollend", endHandler, addEventListenerOptions);
+  }
+  return () => {
+    element.removeEventListener("scroll", handler);
+    if (registerScrollendEvent) {
+      element.removeEventListener("scrollend", endHandler);
+    }
+  };
+};
+var observeElementOffset = (instance, cb) => observeOffset(instance, cb, (el) => {
+  const { horizontal, isRtl } = instance.options;
+  return horizontal ? el.scrollLeft * (isRtl && -1 || 1) : el.scrollTop;
+});
+var measureElement = (element, entry, instance) => {
+  var _a;
+  if (instance.options.useCachedMeasurements) {
+    const index = instance.indexFromElement(element);
+    const key = instance.options.getItemKey(index);
+    return (_a = instance.itemSizeCache.get(key)) != null ? _a : instance.options.estimateSize(index);
+  }
+  if (entry == null ? void 0 : entry.borderBoxSize) {
+    const box = entry.borderBoxSize[0];
+    if (box) {
+      const size = Math.round(
+        box[instance.options.horizontal ? "inlineSize" : "blockSize"]
+      );
+      return size;
+    }
+  }
+  if (!entry) {
+    const index = instance.indexFromElement(element);
+    const key = instance.options.getItemKey(index);
+    const cachedSize = instance.itemSizeCache.get(key);
+    if (cachedSize !== void 0) {
+      return cachedSize;
+    }
+  }
+  return element[instance.options.horizontal ? "offsetWidth" : "offsetHeight"];
+};
+var scrollWithAdjustments = (offset, {
+  adjustments = 0,
+  behavior
+}, instance) => {
+  var _a, _b;
+  (_b = (_a = instance.scrollElement) == null ? void 0 : _a.scrollTo) == null ? void 0 : _b.call(_a, {
+    [instance.options.horizontal ? "left" : "top"]: offset + adjustments,
+    behavior
+  });
+};
+var elementScroll = scrollWithAdjustments;
+var Virtualizer = class {
+  constructor(opts) {
+    this.unsubs = [];
+    this.scrollElement = null;
+    this.targetWindow = null;
+    this.isScrolling = false;
+    this.scrollState = null;
+    this.measurementsCache = [];
+    this._flatMeasurements = null;
+    this.itemSizeCache = /* @__PURE__ */ new Map();
+    this.itemSizeCacheVersion = 0;
+    this.laneAssignments = /* @__PURE__ */ new Map();
+    this.pendingMin = null;
+    this.prevLanes = void 0;
+    this.lanesChangedFlag = false;
+    this.lanesSettling = false;
+    this.pendingScrollAnchor = null;
+    this.scrollRect = null;
+    this.scrollOffset = null;
+    this.scrollDirection = null;
+    this.scrollAdjustments = 0;
+    this._iosDeferredAdjustment = 0;
+    this._iosTouching = false;
+    this._iosJustTouchEnded = false;
+    this._iosTouchEndTimerId = null;
+    this._intendedScrollOffset = null;
+    this.elementsCache = /* @__PURE__ */ new Map();
+    this.now = () => {
+      var _a2;
+      var _a, _b, _c;
+      return (_a2 = (_c = (_b = (_a = this.targetWindow) == null ? void 0 : _a.performance) == null ? void 0 : _b.now) == null ? void 0 : _c.call(_b)) != null ? _a2 : Date.now();
+    };
+    this.observer = /* @__PURE__ */ (() => {
+      let _ro = null;
+      const get = () => {
+        if (_ro) {
+          return _ro;
+        }
+        if (!this.targetWindow || !this.targetWindow.ResizeObserver) {
+          return null;
+        }
+        return _ro = new this.targetWindow.ResizeObserver((entries) => {
+          entries.forEach((entry) => {
+            const run = () => {
+              const node = entry.target;
+              const index = this.indexFromElement(node);
+              if (!node.isConnected) {
+                this.observer.unobserve(node);
+                for (const [cacheKey, cachedNode] of this.elementsCache) {
+                  if (cachedNode === node) {
+                    this.elementsCache.delete(cacheKey);
+                    break;
+                  }
+                }
+                return;
+              }
+              if (this.shouldMeasureDuringScroll(index)) {
+                this.resizeItem(
+                  index,
+                  this.options.measureElement(node, entry, this)
+                );
+              }
+            };
+            this.options.useAnimationFrameWithResizeObserver ? requestAnimationFrame(run) : run();
+          });
+        });
+      };
+      return {
+        disconnect: () => {
+          var _a;
+          (_a = get()) == null ? void 0 : _a.disconnect();
+          _ro = null;
+        },
+        observe: (target) => {
+          var _a;
+          return (_a = get()) == null ? void 0 : _a.observe(target, { box: "border-box" });
+        },
+        unobserve: (target) => {
+          var _a;
+          return (_a = get()) == null ? void 0 : _a.unobserve(target);
+        }
+      };
+    })();
+    this.range = null;
+    this.setOptions = (opts2) => {
+      var _a2, _b2, _c;
+      var _a, _b;
+      const merged = {
+        debug: false,
+        initialOffset: 0,
+        overscan: 1,
+        paddingStart: 0,
+        paddingEnd: 0,
+        scrollPaddingStart: 0,
+        scrollPaddingEnd: 0,
+        horizontal: false,
+        getItemKey: defaultKeyExtractor,
+        rangeExtractor: defaultRangeExtractor,
+        onChange: () => {
+        },
+        measureElement,
+        initialRect: { width: 0, height: 0 },
+        scrollMargin: 0,
+        gap: 0,
+        indexAttribute: "data-index",
+        initialMeasurementsCache: [],
+        lanes: 1,
+        anchorTo: "start",
+        followOnAppend: false,
+        scrollEndThreshold: 1,
+        isScrollingResetDelay: 150,
+        enabled: true,
+        isRtl: false,
+        useScrollendEvent: false,
+        useAnimationFrameWithResizeObserver: false,
+        laneAssignmentMode: "estimate",
+        useCachedMeasurements: false
+      };
+      for (const key in opts2) {
+        const v = opts2[key];
+        if (v !== void 0) merged[key] = v;
+      }
+      const prevOptions = this.options;
+      let anchor = null;
+      let followOnAppend = null;
+      let edgeKeysChanged = false;
+      if (prevOptions !== void 0 && prevOptions.enabled && merged.enabled && merged.anchorTo === "end" && this.scrollElement !== null) {
+        const prevCount = prevOptions.count;
+        const nextCount = merged.count;
+        const measurements = this.getMeasurements();
+        const prevFirstKey = prevCount > 0 ? (_a2 = (_a = measurements[0]) == null ? void 0 : _a.key) != null ? _a2 : prevOptions.getItemKey(0) : null;
+        const prevLastKey = prevCount > 0 ? (_b2 = (_b = measurements[prevCount - 1]) == null ? void 0 : _b.key) != null ? _b2 : prevOptions.getItemKey(prevCount - 1) : null;
+        const didCountChange = nextCount !== prevCount;
+        const didEdgeKeysChange = didCountChange || prevCount > 0 && nextCount > 0 && (merged.getItemKey(0) !== prevFirstKey || merged.getItemKey(nextCount - 1) !== prevLastKey);
+        if (didEdgeKeysChange) {
+          edgeKeysChanged = true;
+          const item = prevCount > 0 ? (_c = this.getVirtualItemForOffset(this.getScrollOffset())) != null ? _c : measurements[0] : null;
+          if (item) {
+            anchor = [item.key, this.getScrollOffset() - item.start];
+          }
+          const behavior = merged.followOnAppend === true ? "auto" : merged.followOnAppend || null;
+          if (behavior && nextCount > prevCount && this.isAtEnd(prevOptions.scrollEndThreshold) && (prevCount === 0 || merged.getItemKey(nextCount - 1) !== prevLastKey)) {
+            followOnAppend = behavior;
+          }
+        }
+      }
+      this.options = merged;
+      if (edgeKeysChanged) {
+        this.pendingMin = 0;
+        this.itemSizeCacheVersion++;
+      }
+      let anchorResolved = false;
+      let anchorDelta = 0;
+      if (anchor && this.scrollOffset !== null) {
+        const [anchorKey, anchorOffset] = anchor;
+        const newMeasurements = this.getMeasurements();
+        const { count, getItemKey } = this.options;
+        let idx = 0;
+        while (idx < count && getItemKey(idx) !== anchorKey) {
+          idx++;
+        }
+        if (idx < count) {
+          const anchorItem = newMeasurements[idx];
+          if (anchorItem) {
+            const newOffset = anchorItem.start + anchorOffset;
+            if (newOffset !== this.scrollOffset) {
+              anchorDelta = newOffset - this.scrollOffset;
+              this.scrollOffset = newOffset;
+              anchorResolved = true;
+            }
+          }
+        }
+      }
+      if (anchorResolved || followOnAppend) {
+        this.pendingScrollAnchor = [
+          anchorResolved ? anchor[0] : null,
+          anchorResolved ? anchor[1] : 0,
+          followOnAppend,
+          anchorDelta
+        ];
+      }
+    };
+    this.notify = (sync) => {
+      var _a, _b;
+      (_b = (_a = this.options).onChange) == null ? void 0 : _b.call(_a, this, sync);
+    };
+    this.maybeNotify = memo(
+      () => {
+        this.calculateRange();
+        return [
+          this.isScrolling,
+          this.range ? this.range.startIndex : null,
+          this.range ? this.range.endIndex : null
+        ];
+      },
+      (isScrolling) => {
+        this.notify(isScrolling);
+      },
+      {
+        key: process.env.NODE_ENV !== "production" && "maybeNotify",
+        debug: () => this.options.debug,
+        initialDeps: [
+          this.isScrolling,
+          this.range ? this.range.startIndex : null,
+          this.range ? this.range.endIndex : null
+        ]
+      }
+    );
+    this.cleanup = () => {
+      this.unsubs.filter(Boolean).forEach((d) => d());
+      this.unsubs = [];
+      this.observer.disconnect();
+      if (this.rafId != null && this.targetWindow) {
+        this.targetWindow.cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+      this.scrollState = null;
+      this.scrollElement = null;
+      this.targetWindow = null;
+    };
+    this._didMount = () => {
+      return () => {
+        this.cleanup();
+      };
+    };
+    this._willUpdate = () => {
+      var _a2;
+      var _a;
+      const scrollElement = this.options.enabled ? this.options.getScrollElement() : null;
+      if (this.scrollElement !== scrollElement) {
+        this.cleanup();
+        if (!scrollElement) {
+          this.maybeNotify();
+          return;
+        }
+        this.scrollElement = scrollElement;
+        if (this.scrollElement && "ownerDocument" in this.scrollElement) {
+          this.targetWindow = this.scrollElement.ownerDocument.defaultView;
+        } else {
+          this.targetWindow = (_a2 = (_a = this.scrollElement) == null ? void 0 : _a.window) != null ? _a2 : null;
+        }
+        this.elementsCache.forEach((cached) => {
+          this.observer.observe(cached);
+        });
+        this.unsubs.push(
+          this.options.observeElementRect(this, (rect) => {
+            this.scrollRect = rect;
+            this.maybeNotify();
+          })
+        );
+        this.unsubs.push(
+          this.options.observeElementOffset(this, (offset, isScrolling) => {
+            if (isScrolling && this._intendedScrollOffset === null && offset === this.scrollOffset) {
+              return;
+            }
+            if (this._intendedScrollOffset !== null && Math.abs(offset - this._intendedScrollOffset) < 1.5) {
+              offset = this._intendedScrollOffset;
+            }
+            this._intendedScrollOffset = null;
+            this.scrollAdjustments = 0;
+            const prevOffset = this.getScrollOffset();
+            this.scrollDirection = isScrolling ? prevOffset === offset ? this.scrollDirection : prevOffset < offset ? "forward" : "backward" : null;
+            this.scrollOffset = offset;
+            this.isScrolling = isScrolling;
+            this._flushIosDeferredIfReady();
+            if (this.scrollState) {
+              this.scheduleScrollReconcile();
+            }
+            this.maybeNotify();
+          })
+        );
+        if ("addEventListener" in this.scrollElement) {
+          const scrollEl = this.scrollElement;
+          const onTouchStart = () => {
+            this._iosTouching = true;
+            this._iosJustTouchEnded = false;
+            if (this._iosTouchEndTimerId !== null && this.targetWindow != null) {
+              this.targetWindow.clearTimeout(this._iosTouchEndTimerId);
+              this._iosTouchEndTimerId = null;
+            }
+          };
+          const onTouchEnd = () => {
+            this._iosTouching = false;
+            if (!isIOSWebKit() || this.targetWindow == null) {
+              return;
+            }
+            this._iosJustTouchEnded = true;
+            this._iosTouchEndTimerId = this.targetWindow.setTimeout(() => {
+              this._iosJustTouchEnded = false;
+              this._iosTouchEndTimerId = null;
+              this._flushIosDeferredIfReady();
+            }, 150);
+          };
+          scrollEl.addEventListener(
+            "touchstart",
+            onTouchStart,
+            addEventListenerOptions
+          );
+          scrollEl.addEventListener(
+            "touchend",
+            onTouchEnd,
+            addEventListenerOptions
+          );
+          this.unsubs.push(() => {
+            scrollEl.removeEventListener("touchstart", onTouchStart);
+            scrollEl.removeEventListener("touchend", onTouchEnd);
+            if (this._iosTouchEndTimerId !== null && this.targetWindow != null) {
+              this.targetWindow.clearTimeout(this._iosTouchEndTimerId);
+              this._iosTouchEndTimerId = null;
+            }
+          });
+        }
+        this._scrollToOffset(this.getScrollOffset(), {
+          adjustments: void 0,
+          behavior: void 0
+        });
+      }
+      const anchor = this.pendingScrollAnchor;
+      this.pendingScrollAnchor = null;
+      if (anchor && this.scrollElement && this.options.enabled) {
+        const [key, _offset, followOnAppend, anchorDelta] = anchor;
+        if (key !== null && !followOnAppend) {
+          if (isIOSWebKit() && (this.isScrolling || this._iosTouching || this._iosJustTouchEnded)) {
+            if (anchorDelta !== 0) {
+              this._iosDeferredAdjustment += anchorDelta;
+            }
+          } else {
+            this._scrollToOffset(this.getScrollOffset(), {
+              adjustments: void 0,
+              behavior: void 0
+            });
+          }
+        }
+        if (followOnAppend) {
+          this.scrollToEnd({ behavior: followOnAppend });
+        }
+      }
+    };
+    this._flushIosDeferredIfReady = () => {
+      if (this._iosDeferredAdjustment === 0) return;
+      if (this.isScrolling) return;
+      if (this._iosTouching) return;
+      if (this._iosJustTouchEnded) return;
+      const cur = this.getScrollOffset();
+      const max = this.getMaxScrollOffset();
+      if (cur < 0 || cur > max) return;
+      const delta = this._iosDeferredAdjustment;
+      this._iosDeferredAdjustment = 0;
+      this._scrollToOffset(cur, {
+        adjustments: this.scrollAdjustments += delta,
+        behavior: void 0
+      });
+    };
+    this.rafId = null;
+    this.getSize = () => {
+      var _a;
+      if (!this.options.enabled) {
+        this.scrollRect = null;
+        return 0;
+      }
+      this.scrollRect = (_a = this.scrollRect) != null ? _a : this.options.initialRect;
+      return this.scrollRect[this.options.horizontal ? "width" : "height"];
+    };
+    this.getScrollOffset = () => {
+      var _a;
+      if (!this.options.enabled) {
+        this.scrollOffset = null;
+        return 0;
+      }
+      this.scrollOffset = (_a = this.scrollOffset) != null ? _a : typeof this.options.initialOffset === "function" ? this.options.initialOffset() : this.options.initialOffset;
+      return this.scrollOffset;
+    };
+    this.getFurthestMeasurement = (measurements, index) => {
+      const furthestMeasurementsFound = /* @__PURE__ */ new Map();
+      const furthestMeasurements = /* @__PURE__ */ new Map();
+      for (let m = index - 1; m >= 0; m--) {
+        const measurement = measurements[m];
+        if (furthestMeasurementsFound.has(measurement.lane)) {
+          continue;
+        }
+        const previousFurthestMeasurement = furthestMeasurements.get(
+          measurement.lane
+        );
+        if (previousFurthestMeasurement == null || measurement.end > previousFurthestMeasurement.end) {
+          furthestMeasurements.set(measurement.lane, measurement);
+        } else if (measurement.end < previousFurthestMeasurement.end) {
+          furthestMeasurementsFound.set(measurement.lane, true);
+        }
+        if (furthestMeasurementsFound.size === this.options.lanes) {
+          break;
+        }
+      }
+      return furthestMeasurements.size === this.options.lanes ? Array.from(furthestMeasurements.values()).sort((a, b) => {
+        if (a.end === b.end) {
+          return a.index - b.index;
+        }
+        return a.end - b.end;
+      })[0] : void 0;
+    };
+    this.getMeasurementOptions = memo(
+      () => [
+        this.options.count,
+        this.options.paddingStart,
+        this.options.scrollMargin,
+        this.options.getItemKey,
+        this.options.enabled,
+        this.options.lanes,
+        this.options.laneAssignmentMode
+      ],
+      (count, paddingStart, scrollMargin, getItemKey, enabled, lanes, laneAssignmentMode) => {
+        const lanesChanged = this.prevLanes !== void 0 && this.prevLanes !== lanes;
+        if (lanesChanged) {
+          this.lanesChangedFlag = true;
+        }
+        this.prevLanes = lanes;
+        this.pendingMin = null;
+        return {
+          count,
+          paddingStart,
+          scrollMargin,
+          getItemKey,
+          enabled,
+          lanes,
+          laneAssignmentMode
+        };
+      },
+      {
+        key: false
+      }
+    );
+    this.getMeasurements = memo(
+      () => [this.getMeasurementOptions(), this.itemSizeCacheVersion],
+      ({
+        count,
+        paddingStart,
+        scrollMargin,
+        getItemKey,
+        enabled,
+        lanes,
+        laneAssignmentMode
+      }, _itemSizeCacheVersion) => {
+        var _a;
+        const itemSizeCache = this.itemSizeCache;
+        if (!enabled) {
+          this.measurementsCache = [];
+          this.itemSizeCache.clear();
+          this.laneAssignments.clear();
+          return [];
+        }
+        if (this.laneAssignments.size > count) {
+          for (const index of this.laneAssignments.keys()) {
+            if (index >= count) {
+              this.laneAssignments.delete(index);
+            }
+          }
+        }
+        if (this.lanesChangedFlag) {
+          this.lanesChangedFlag = false;
+          this.lanesSettling = true;
+          this.measurementsCache = [];
+          this.itemSizeCache.clear();
+          this.laneAssignments.clear();
+          this.pendingMin = null;
+        }
+        if (this.measurementsCache.length === 0 && !this.lanesSettling) {
+          this.measurementsCache = this.options.initialMeasurementsCache;
+          this.measurementsCache.forEach((item) => {
+            this.itemSizeCache.set(item.key, item.size);
+          });
+        }
+        const min = this.lanesSettling ? 0 : (_a = this.pendingMin) != null ? _a : 0;
+        this.pendingMin = null;
+        if (this.lanesSettling && this.measurementsCache.length === count) {
+          this.lanesSettling = false;
+        }
+        if (lanes === 1) {
+          const gap = this.options.gap;
+          const need = count * 2;
+          let flat = this._flatMeasurements;
+          if (!flat || flat.length < need) {
+            const next = new Float64Array(need);
+            if (flat && min > 0) next.set(flat.subarray(0, min * 2));
+            flat = next;
+            this._flatMeasurements = flat;
+          }
+          let runningStart;
+          if (min === 0) {
+            runningStart = paddingStart + scrollMargin;
+          } else {
+            const prevIdx = min - 1;
+            runningStart = flat[prevIdx * 2] + flat[prevIdx * 2 + 1] + gap;
+          }
+          for (let i = min; i < count; i++) {
+            const key = getItemKey(i);
+            const measuredSize = itemSizeCache.get(key);
+            const size = typeof measuredSize === "number" ? measuredSize : this.options.estimateSize(i);
+            flat[i * 2] = runningStart;
+            flat[i * 2 + 1] = size;
+            runningStart += size + gap;
+          }
+          const view = createLazyMeasurementsView(count, flat, getItemKey);
+          this.measurementsCache = view;
+          return view;
+        }
+        const measurements = this.measurementsCache.slice(0, min);
+        const laneLastIndex = new Array(lanes).fill(
+          void 0
+        );
+        for (let m = 0; m < min; m++) {
+          const item = measurements[m];
+          if (item) {
+            laneLastIndex[item.lane] = m;
+          }
+        }
+        for (let i = min; i < count; i++) {
+          const key = getItemKey(i);
+          const cachedLane = this.laneAssignments.get(i);
+          let lane;
+          let start;
+          const shouldCacheLane = laneAssignmentMode === "estimate" || itemSizeCache.has(key);
+          if (cachedLane !== void 0 && this.options.lanes > 1) {
+            lane = cachedLane;
+            const prevIndex = laneLastIndex[lane];
+            const prevInLane = prevIndex !== void 0 ? measurements[prevIndex] : void 0;
+            start = prevInLane ? prevInLane.end + this.options.gap : paddingStart + scrollMargin;
+          } else {
+            const furthestMeasurement = this.options.lanes === 1 ? measurements[i - 1] : this.getFurthestMeasurement(measurements, i);
+            start = furthestMeasurement ? furthestMeasurement.end + this.options.gap : paddingStart + scrollMargin;
+            lane = furthestMeasurement ? furthestMeasurement.lane : i % this.options.lanes;
+            if (this.options.lanes > 1 && shouldCacheLane) {
+              this.laneAssignments.set(i, lane);
+            }
+          }
+          const measuredSize = itemSizeCache.get(key);
+          const size = typeof measuredSize === "number" ? measuredSize : this.options.estimateSize(i);
+          const end = start + size;
+          measurements[i] = {
+            index: i,
+            start,
+            size,
+            end,
+            key,
+            lane
+          };
+          laneLastIndex[lane] = i;
+        }
+        this.measurementsCache = measurements;
+        return measurements;
+      },
+      {
+        key: process.env.NODE_ENV !== "production" && "getMeasurements",
+        debug: () => this.options.debug
+      }
+    );
+    this.calculateRange = memo(
+      () => [
+        this.getMeasurements(),
+        this.getSize(),
+        this.getScrollOffset(),
+        this.options.lanes
+      ],
+      (measurements, outerSize, scrollOffset, lanes) => {
+        if (measurements.length === 0 || outerSize === 0) {
+          this.range = null;
+          return null;
+        }
+        this.range = calculateRangeImpl(
+          measurements,
+          outerSize,
+          scrollOffset,
+          lanes,
+          // Pass the typed array so binary search + forward-walk can read
+          // start/end directly from Float64Array, skipping the Proxy traps.
+          lanes === 1 && this._flatMeasurements != null ? this._flatMeasurements : null
+        );
+        return this.range;
+      },
+      {
+        key: process.env.NODE_ENV !== "production" && "calculateRange",
+        debug: () => this.options.debug
+      }
+    );
+    this.getVirtualIndexes = memo(
+      () => {
+        let startIndex = null;
+        let endIndex = null;
+        const range = this.calculateRange();
+        if (range) {
+          startIndex = range.startIndex;
+          endIndex = range.endIndex;
+        }
+        this.maybeNotify.updateDeps([this.isScrolling, startIndex, endIndex]);
+        return [
+          this.options.rangeExtractor,
+          this.options.overscan,
+          this.options.count,
+          startIndex,
+          endIndex
+        ];
+      },
+      (rangeExtractor, overscan, count, startIndex, endIndex) => {
+        return startIndex === null || endIndex === null ? [] : rangeExtractor({
+          startIndex,
+          endIndex,
+          overscan,
+          count
+        });
+      },
+      {
+        key: process.env.NODE_ENV !== "production" && "getVirtualIndexes",
+        debug: () => this.options.debug
+      }
+    );
+    this.indexFromElement = (node) => {
+      const attributeName = this.options.indexAttribute;
+      const indexStr = node.getAttribute(attributeName);
+      if (!indexStr) {
+        console.warn(
+          `Missing attribute name '${attributeName}={index}' on measured element.`
+        );
+        return -1;
+      }
+      return parseInt(indexStr, 10);
+    };
+    this.shouldMeasureDuringScroll = (index) => {
+      var _a2;
+      var _a;
+      if (!this.scrollState || this.scrollState.behavior !== "smooth") {
+        return true;
+      }
+      const scrollIndex = (_a2 = this.scrollState.index) != null ? _a2 : (_a = this.getVirtualItemForOffset(this.scrollState.lastTargetOffset)) == null ? void 0 : _a.index;
+      if (scrollIndex !== void 0 && this.range) {
+        const bufferSize = Math.max(
+          this.options.overscan,
+          Math.ceil((this.range.endIndex - this.range.startIndex) / 2)
+        );
+        const minIndex = Math.max(0, scrollIndex - bufferSize);
+        const maxIndex = Math.min(
+          this.options.count - 1,
+          scrollIndex + bufferSize
+        );
+        return index >= minIndex && index <= maxIndex;
+      }
+      return true;
+    };
+    this.measureElement = (node) => {
+      if (!node) {
+        this.elementsCache.forEach((cached, key2) => {
+          if (!cached.isConnected) {
+            this.observer.unobserve(cached);
+            this.elementsCache.delete(key2);
+          }
+        });
+        return;
+      }
+      const index = this.indexFromElement(node);
+      const key = this.options.getItemKey(index);
+      const prevNode = this.elementsCache.get(key);
+      if (prevNode !== node) {
+        if (prevNode) {
+          this.observer.unobserve(prevNode);
+        }
+        this.observer.observe(node);
+        this.elementsCache.set(key, node);
+      }
+      if ((!this.isScrolling || this.scrollState) && this.shouldMeasureDuringScroll(index)) {
+        this.resizeItem(index, this.options.measureElement(node, void 0, this));
+      }
+    };
+    this.resizeItem = (index, size) => {
+      var _a2, _b2;
+      var _a, _b;
+      if (index < 0 || index >= this.options.count) return;
+      let cachedSize;
+      let itemStart;
+      let key;
+      const flat = this._flatMeasurements;
+      if (this.options.lanes === 1 && flat !== null) {
+        key = this.options.getItemKey(index);
+        itemStart = flat[index * 2];
+        cachedSize = flat[index * 2 + 1];
+      } else {
+        const item = this.measurementsCache[index];
+        if (!item) return;
+        key = item.key;
+        itemStart = item.start;
+        cachedSize = item.size;
+      }
+      const itemSize = (_a2 = this.itemSizeCache.get(key)) != null ? _a2 : cachedSize;
+      const delta = size - itemSize;
+      if (delta !== 0) {
+        const wasAtEnd = this.options.anchorTo === "end" && ((_a = this.scrollState) == null ? void 0 : _a.behavior) !== "smooth" && this.getVirtualDistanceFromEnd() <= this.options.scrollEndThreshold;
+        const prevTotalSize = wasAtEnd ? this.getTotalSize() : 0;
+        const shouldAdjustScroll = ((_b = this.scrollState) == null ? void 0 : _b.behavior) !== "smooth" && (this.shouldAdjustScrollPositionOnItemSizeChange !== void 0 ? this.shouldAdjustScrollPositionOnItemSizeChange(
+          // The callback expects a VirtualItem; build one lazily only
+          // when the consumer actually supplied a custom predicate.
+          (_b2 = this.measurementsCache[index]) != null ? _b2 : {
+            index,
+            key,
+            start: itemStart,
+            size: cachedSize,
+            end: itemStart + cachedSize,
+            lane: 0
+          },
+          delta,
+          this
+        ) : (
+          // Default: adjust when the resize is an above-viewport item.
+          // First measurement (!has(key)): always adjust — the item
+          // has never been sized, so the estimate→actual delta must
+          // be compensated regardless of scroll direction.
+          // Re-measurement (has(key)): skip during backward scroll
+          // to avoid the "items jump while scrolling up" cascade.
+          itemStart < this.getScrollOffset() + this.scrollAdjustments && (!this.itemSizeCache.has(key) || this.scrollDirection !== "backward")
+        ));
+        if (this.pendingMin === null || index < this.pendingMin) {
+          this.pendingMin = index;
+        }
+        this.itemSizeCache.set(key, size);
+        this.itemSizeCacheVersion++;
+        if (wasAtEnd) {
+          this.applyScrollAdjustment(this.getTotalSize() - prevTotalSize);
+        } else if (shouldAdjustScroll) {
+          this.applyScrollAdjustment(delta);
+        }
+        this.notify(false);
+      }
+    };
+    this.getVirtualItems = memo(
+      () => [this.getVirtualIndexes(), this.getMeasurements()],
+      (indexes, measurements) => {
+        const virtualItems = [];
+        for (let k = 0, len = indexes.length; k < len; k++) {
+          const i = indexes[k];
+          const measurement = measurements[i];
+          virtualItems.push(measurement);
+        }
+        return virtualItems;
+      },
+      {
+        key: process.env.NODE_ENV !== "production" && "getVirtualItems",
+        debug: () => this.options.debug
+      }
+    );
+    this.getVirtualItemForOffset = (offset) => {
+      const measurements = this.getMeasurements();
+      if (measurements.length === 0) {
+        return void 0;
+      }
+      const flat = this._flatMeasurements;
+      const useFlat = this.options.lanes === 1 && flat != null;
+      const idx = findNearestBinarySearch(
+        0,
+        measurements.length - 1,
+        useFlat ? (i) => flat[i * 2] : (i) => notUndefined(measurements[i]).start,
+        offset
+      );
+      return notUndefined(measurements[idx]);
+    };
+    this.getMaxScrollOffset = () => {
+      if (!this.scrollElement) return 0;
+      if ("scrollHeight" in this.scrollElement) {
+        return this.options.horizontal ? this.scrollElement.scrollWidth - this.scrollElement.clientWidth : this.scrollElement.scrollHeight - this.scrollElement.clientHeight;
+      } else {
+        const doc = this.scrollElement.document.documentElement;
+        return this.options.horizontal ? doc.scrollWidth - this.scrollElement.innerWidth : doc.scrollHeight - this.scrollElement.innerHeight;
+      }
+    };
+    this.getVirtualDistanceFromEnd = () => {
+      return Math.max(
+        this.getTotalSize() - this.getSize() - this.getScrollOffset(),
+        0
+      );
+    };
+    this.getDistanceFromEnd = () => {
+      return Math.max(this.getMaxScrollOffset() - this.getScrollOffset(), 0);
+    };
+    this.isAtEnd = (threshold = this.options.scrollEndThreshold) => {
+      return this.getDistanceFromEnd() <= threshold;
+    };
+    this.getOffsetForAlignment = (toOffset, align, itemSize = 0) => {
+      if (!this.scrollElement) return 0;
+      const size = this.getSize();
+      const scrollOffset = this.getScrollOffset();
+      if (align === "auto") {
+        align = toOffset >= scrollOffset + size ? "end" : "start";
+      }
+      if (align === "center") {
+        toOffset += (itemSize - size) / 2;
+      } else if (align === "end") {
+        toOffset -= size;
+      }
+      const maxOffset = this.getMaxScrollOffset();
+      return Math.max(Math.min(maxOffset, toOffset), 0);
+    };
+    this.getOffsetForIndex = (index, align = "auto") => {
+      index = Math.max(0, Math.min(index, this.options.count - 1));
+      const size = this.getSize();
+      const scrollOffset = this.getScrollOffset();
+      const item = this.measurementsCache[index];
+      if (!item) return;
+      if (align === "auto") {
+        if (item.end >= scrollOffset + size - this.options.scrollPaddingEnd) {
+          align = "end";
+        } else if (item.start <= scrollOffset + this.options.scrollPaddingStart) {
+          align = "start";
+        } else {
+          return [scrollOffset, align];
+        }
+      }
+      if (align === "end" && index === this.options.count - 1) {
+        return [this.getMaxScrollOffset(), align];
+      }
+      const toOffset = align === "end" ? item.end + this.options.scrollPaddingEnd : item.start - this.options.scrollPaddingStart;
+      return [
+        this.getOffsetForAlignment(toOffset, align, item.size),
+        align
+      ];
+    };
+    this.scrollToOffset = (toOffset, { align = "start", behavior = "auto" } = {}) => {
+      const offset = this.getOffsetForAlignment(toOffset, align);
+      const now = this.now();
+      this.scrollState = {
+        index: null,
+        align,
+        behavior,
+        startedAt: now,
+        lastTargetOffset: offset,
+        stableFrames: 0
+      };
+      this._scrollToOffset(offset, { adjustments: void 0, behavior });
+      this.scheduleScrollReconcile();
+    };
+    this.scrollToIndex = (index, {
+      align: initialAlign = "auto",
+      behavior = "auto"
+    } = {}) => {
+      index = Math.max(0, Math.min(index, this.options.count - 1));
+      const offsetInfo = this.getOffsetForIndex(index, initialAlign);
+      if (!offsetInfo) {
+        return;
+      }
+      const [offset, align] = offsetInfo;
+      const now = this.now();
+      this.scrollState = {
+        index,
+        align,
+        behavior,
+        startedAt: now,
+        lastTargetOffset: offset,
+        stableFrames: 0
+      };
+      this._scrollToOffset(offset, { adjustments: void 0, behavior });
+      this.scheduleScrollReconcile();
+    };
+    this.scrollBy = (delta, { behavior = "auto" } = {}) => {
+      const offset = this.getScrollOffset() + delta;
+      const now = this.now();
+      this.scrollState = {
+        index: null,
+        align: "start",
+        behavior,
+        startedAt: now,
+        lastTargetOffset: offset,
+        stableFrames: 0
+      };
+      this._scrollToOffset(offset, { adjustments: void 0, behavior });
+      this.scheduleScrollReconcile();
+    };
+    this.scrollToEnd = ({ behavior = "auto" } = {}) => {
+      if (this.options.count > 0) {
+        this.scrollToIndex(this.options.count - 1, {
+          align: "end",
+          behavior
+        });
+        return;
+      }
+      this.scrollToOffset(Math.max(this.getTotalSize() - this.getSize(), 0), {
+        behavior
+      });
+    };
+    this.getTotalSize = () => {
+      var _a2;
+      var _a;
+      const measurements = this.getMeasurements();
+      let end;
+      if (measurements.length === 0) {
+        end = this.options.paddingStart;
+      } else if (this.options.lanes === 1) {
+        const lastIdx = measurements.length - 1;
+        const flat = this._flatMeasurements;
+        if (flat != null) {
+          end = flat[lastIdx * 2] + flat[lastIdx * 2 + 1];
+        } else {
+          end = (_a2 = (_a = measurements[lastIdx]) == null ? void 0 : _a.end) != null ? _a2 : 0;
+        }
+      } else {
+        const endByLane = Array(this.options.lanes).fill(null);
+        let endIndex = measurements.length - 1;
+        while (endIndex >= 0 && endByLane.some((val) => val === null)) {
+          const item = measurements[endIndex];
+          if (endByLane[item.lane] === null) {
+            endByLane[item.lane] = item.end;
+          }
+          endIndex--;
+        }
+        end = Math.max(...endByLane.filter((val) => val !== null));
+      }
+      return Math.max(
+        end - this.options.scrollMargin + this.options.paddingEnd,
+        0
+      );
+    };
+    this.takeSnapshot = () => {
+      const snapshot = [];
+      if (this.itemSizeCache.size === 0) return snapshot;
+      const m = this.getMeasurements();
+      for (const item of m) {
+        if (item && this.itemSizeCache.has(item.key)) {
+          snapshot.push({
+            index: item.index,
+            key: item.key,
+            start: item.start,
+            size: item.size,
+            end: item.end,
+            lane: item.lane
+          });
+        }
+      }
+      return snapshot;
+    };
+    this._scrollToOffset = (offset, {
+      adjustments,
+      behavior
+    }) => {
+      this._intendedScrollOffset = offset + (adjustments != null ? adjustments : 0);
+      this.options.scrollToFn(offset, { behavior, adjustments }, this);
+    };
+    this.measure = () => {
+      this.pendingMin = null;
+      this.itemSizeCache.clear();
+      this.laneAssignments.clear();
+      this.itemSizeCacheVersion++;
+      this.notify(false);
+    };
+    this.setOptions(opts);
+  }
+  applyScrollAdjustment(delta, behavior) {
+    if (delta === 0) return;
+    if (process.env.NODE_ENV !== "production" && this.options.debug) {
+      console.info("correction", delta);
+    }
+    if (isIOSWebKit() && (this.isScrolling || this._iosTouching || this._iosJustTouchEnded)) {
+      this._iosDeferredAdjustment += delta;
+    } else {
+      this._scrollToOffset(this.getScrollOffset(), {
+        adjustments: this.scrollAdjustments += delta,
+        behavior
+      });
+      if (this.scrollOffset !== null) {
+        this.scrollOffset += this.scrollAdjustments;
+        this.scrollAdjustments = 0;
+      }
+    }
+  }
+  scheduleScrollReconcile() {
+    if (!this.targetWindow) {
+      this.scrollState = null;
+      return;
+    }
+    if (this.rafId != null) return;
+    this.rafId = this.targetWindow.requestAnimationFrame(() => {
+      this.rafId = null;
+      this.reconcileScroll();
+    });
+  }
+  reconcileScroll() {
+    if (!this.scrollState) return;
+    const el = this.scrollElement;
+    if (!el) return;
+    const MAX_RECONCILE_MS = 5e3;
+    if (this.now() - this.scrollState.startedAt > MAX_RECONCILE_MS) {
+      this.scrollState = null;
+      return;
+    }
+    const offsetInfo = this.scrollState.index != null ? this.getOffsetForIndex(this.scrollState.index, this.scrollState.align) : void 0;
+    const targetOffset = offsetInfo ? offsetInfo[0] : this.scrollState.lastTargetOffset;
+    const STABLE_FRAMES = 1;
+    const targetChanged = targetOffset !== this.scrollState.lastTargetOffset;
+    if (!targetChanged && approxEqual(targetOffset, this.getScrollOffset())) {
+      this.scrollState.stableFrames++;
+      if (this.scrollState.stableFrames >= STABLE_FRAMES) {
+        if (this.getScrollOffset() !== targetOffset) {
+          this._scrollToOffset(targetOffset, {
+            adjustments: void 0,
+            behavior: "auto"
+          });
+        }
+        this.scrollState = null;
+        return;
+      }
+    } else {
+      this.scrollState.stableFrames = 0;
+      if (targetChanged) {
+        const viewport = this.getSize() || 600;
+        const distance = Math.abs(targetOffset - this.getScrollOffset());
+        const keepSmooth = this.scrollState.behavior === "smooth" && distance > viewport;
+        this.scrollState.lastTargetOffset = targetOffset;
+        if (!keepSmooth) {
+          this.scrollState.behavior = "auto";
+        }
+        this._scrollToOffset(targetOffset, {
+          adjustments: void 0,
+          behavior: keepSmooth ? "smooth" : "auto"
+        });
+      }
+    }
+    this.scheduleScrollReconcile();
+  }
+};
+var findNearestBinarySearch = (low, high, getCurrentValue, value) => {
+  while (low <= high) {
+    const middle = (low + high) / 2 | 0;
+    const currentValue = getCurrentValue(middle);
+    if (currentValue < value) {
+      low = middle + 1;
+    } else if (currentValue > value) {
+      high = middle - 1;
+    } else {
+      return middle;
+    }
+  }
+  if (low > 0) {
+    return low - 1;
+  } else {
+    return 0;
+  }
+};
+function findNearestBinarySearchFlat(flat, high, value) {
+  let low = 0;
+  while (low <= high) {
+    const middle = (low + high) / 2 | 0;
+    const currentValue = flat[middle * 2];
+    if (currentValue < value) {
+      low = middle + 1;
+    } else if (currentValue > value) {
+      high = middle - 1;
+    } else {
+      return middle;
+    }
+  }
+  return low > 0 ? low - 1 : 0;
+}
+function calculateRangeImpl(measurements, outerSize, scrollOffset, lanes, flat) {
+  const lastIndex = measurements.length - 1;
+  if (measurements.length <= lanes) {
+    return { startIndex: 0, endIndex: lastIndex };
+  }
+  if (lanes === 1 && flat !== null) {
+    const startIndex2 = findNearestBinarySearchFlat(
+      flat,
+      lastIndex,
+      scrollOffset
+    );
+    let endIndex2 = startIndex2;
+    const limit = scrollOffset + outerSize;
+    while (endIndex2 < lastIndex && flat[endIndex2 * 2] + flat[endIndex2 * 2 + 1] < limit) {
+      endIndex2++;
+    }
+    return { startIndex: startIndex2, endIndex: endIndex2 };
+  }
+  const getStart = (index) => measurements[index].start;
+  let startIndex = findNearestBinarySearch(0, lastIndex, getStart, scrollOffset);
+  let endIndex = startIndex;
+  if (lanes === 1) {
+    while (endIndex < lastIndex && measurements[endIndex].end < scrollOffset + outerSize) {
+      endIndex++;
+    }
+  } else if (lanes > 1) {
+    const endPerLane = Array(lanes).fill(0);
+    while (endIndex < lastIndex && endPerLane.some((pos) => pos < scrollOffset + outerSize)) {
+      const item = measurements[endIndex];
+      endPerLane[item.lane] = item.end;
+      endIndex++;
+    }
+    const startPerLane = Array(lanes).fill(scrollOffset + outerSize);
+    while (startIndex >= 0 && startPerLane.some((pos) => pos >= scrollOffset)) {
+      const item = measurements[startIndex];
+      startPerLane[item.lane] = item.start;
+      startIndex--;
+    }
+    startIndex = Math.max(0, startIndex - startIndex % lanes);
+    endIndex = Math.min(lastIndex, endIndex + (lanes - 1 - endIndex % lanes));
+  }
+  return { startIndex, endIndex };
+}
+
 // src/results-list.js
+var GROUP_ROW_HEIGHT = 30;
+var RESULT_OVERSCAN = 10;
+function emptyElement(el) {
+  if (!el) return;
+  if (typeof el.empty === "function") el.empty();
+  else el.textContent = "";
+}
+function createDiv(parent, cls) {
+  if (typeof parent.createDiv === "function") return parent.createDiv({ cls });
+  const el = parent.ownerDocument.createElement("div");
+  el.className = cls;
+  parent.appendChild(el);
+  return el;
+}
+function createSpan(parent, cls, text) {
+  if (typeof parent.createSpan === "function")
+    return parent.createSpan({ cls, text });
+  const el = parent.ownerDocument.createElement("span");
+  el.className = cls;
+  el.textContent = text;
+  parent.appendChild(el);
+  return el;
+}
+function setClass(el, cls, on) {
+  if (!el) return;
+  if (typeof el.toggleClass === "function") el.toggleClass(cls, on);
+  else el.classList.toggle(cls, on);
+}
+function scrollAlignFromBlock(block) {
+  if (block === "center") return "center";
+  if (block === "start") return "start";
+  if (block === "end") return "end";
+  return "auto";
+}
 var VirtualResultList = class {
   constructor({ container, getCurrent, getGroupInfo, onAfterRender, renderRow }) {
     this.el = container;
@@ -1059,335 +2452,271 @@ var VirtualResultList = class {
     this.onAfterRender = onAfterRender;
     this.renderRow = renderRow;
     this.itemCount = 0;
-    this.renderLimit = RESULT_RENDER_BATCH;
-    this.renderedCount = 0;
-    this.renderedGroupKey = null;
+    this.rows = [];
+    this.matchRowByIndex = /* @__PURE__ */ new Map();
+    this.groupInfo = null;
+    this.innerEl = null;
+    this.stickyEl = null;
+    this.renderedItems = /* @__PURE__ */ new Map();
     this.activeRow = null;
-    this.observer = null;
-    this.sentinelEl = null;
-    this.spacerEl = null;
-    this.moreBtnEl = null;
-    this.displayLimit = 0;
-    this.averageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
-    this.renderToken = 0;
-    this.scrollFrame = null;
-    this.scrollWindow = null;
-    this.prefetchId = null;
-    this.prefetchKind = null;
-    this.prefetchWindow = null;
-    this.catchupFrame = null;
-    this.catchupWindow = null;
-    this.onScroll = null;
-    this.setupObserver();
+    this.renderFrame = null;
+    this.cleanupVirtualizer = null;
+    this.virtualizer = new Virtualizer(this.virtualizerOptions(0));
+    this.cleanupVirtualizer = this.virtualizer._didMount();
+    this.virtualizer._willUpdate();
   }
   destroy() {
-    this.disconnectObserver();
-    this.cancelPrefetch();
-    this.cancelCatchup();
-    this.cancelScrollCheck();
-    this.clearTail();
-    if (this.el) this.el.empty();
+    this.cancelRender();
+    if (this.cleanupVirtualizer) this.cleanupVirtualizer();
+    this.cleanupVirtualizer = null;
+    this.virtualizer = null;
+    this.clearDom();
     this.el = null;
-    this.itemCount = 0;
+    this.rows = [];
+    this.matchRowByIndex = /* @__PURE__ */ new Map();
     this.activeRow = null;
   }
   clear() {
-    this.renderToken += 1;
-    this.cancelPrefetch();
-    this.cancelCatchup();
-    this.cancelScrollCheck();
-    this.clearTail();
-    if (this.el) this.el.empty();
-    this.renderLimit = RESULT_RENDER_BATCH;
-    this.renderedCount = 0;
-    this.renderedGroupKey = null;
+    this.cancelRender();
+    this.itemCount = 0;
+    this.rows = [];
+    this.matchRowByIndex = /* @__PURE__ */ new Map();
+    this.groupInfo = null;
     this.activeRow = null;
-    this.displayLimit = 0;
-    this.averageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
+    this.clearDom();
+    this.configureVirtualizer(0);
   }
   setItems(itemCount, activeIndex) {
-    const el = this.el;
-    if (!el) return;
-    this.clear();
+    this.cancelRender();
     this.itemCount = Math.max(0, Number(itemCount) || 0);
-    if (!this.itemCount) return;
-    el.scrollTop = 0;
-    this.displayLimit = Math.min(this.itemCount, RESULT_DISPLAY_CAP);
-    this.ensureCapCovers(activeIndex);
-    this.renderLimit = Math.min(
-      this.displayLimit || this.itemCount,
-      Math.max(RESULT_RENDER_BATCH, activeIndex + 1)
-    );
-    this.renderChunk(this.renderLimit);
+    this.rebuildRows();
+    this.activeRow = null;
+    this.clearDom();
+    if (!this.itemCount || !this.rows.length) {
+      this.configureVirtualizer(0);
+      return;
+    }
+    this.createDom();
+    this.configureVirtualizer(this.rows.length);
+    if (this.virtualizer) this.virtualizer.measure();
+    this.scheduleRender();
     this.setActive(activeIndex, { block: "center" });
-    this.schedulePrefetch();
   }
-  ensureCapCovers(index) {
-    if (index == null || index < 0) return;
-    if (index < this.displayLimit) return;
-    const steps = Math.ceil((index + 1) / RESULT_DISPLAY_CAP);
-    this.displayLimit = Math.min(this.itemCount, steps * RESULT_DISPLAY_CAP);
-  }
-  renderChunk(targetCount) {
-    const el = this.el;
-    if (!el || !this.itemCount) return false;
-    const groupInfo = this.getGroupInfo ? this.getGroupInfo() : null;
-    const start = this.renderedCount || 0;
-    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    const end = Math.min(limit, targetCount);
-    if (end <= start) return false;
-    const keepScrollTop = el.scrollTop;
-    this.clearTail();
-    const state = { lastGroupKey: this.renderedGroupKey };
-    const activeIndex = this.current();
-    for (let i = start; i < end; i++) {
-      const row = this.renderRow ? this.renderRow(i, groupInfo, state) : null;
-      if (row && i === activeIndex) {
-        row.addClass("is-active");
-        this.activeRow = row;
+  virtualizerOptions(count) {
+    return {
+      count,
+      getScrollElement: () => this.el,
+      estimateSize: (index) => this.estimateSize(index),
+      getItemKey: (index) => this.rowKey(index),
+      overscan: RESULT_OVERSCAN,
+      observeElementRect,
+      observeElementOffset,
+      scrollToFn: elementScroll,
+      measureElement,
+      onChange: () => this.scheduleRender(),
+      initialRect: {
+        width: this.el ? this.el.clientWidth || 340 : 340,
+        height: this.el ? this.el.clientHeight || 320 : 320
       }
-    }
-    this.renderedCount = end;
-    this.renderedGroupKey = state.lastGroupKey;
-    this.updateAverageHeight(el.scrollHeight, this.renderedCount);
-    this.updateTail();
-    el.scrollTop = keepScrollTop;
-    return true;
-  }
-  ensureRendered(index) {
-    if (index < 0 || index >= this.itemCount) return false;
-    if (index < (this.renderedCount || 0)) return true;
-    this.ensureCapCovers(index);
-    this.renderLimit = Math.min(
-      this.displayLimit || this.itemCount,
-      Math.max(index + 1, (this.renderedCount || 0) + RESULT_RENDER_BATCH)
-    );
-    const changed = this.renderChunk(this.renderLimit);
-    if (changed && this.onAfterRender) this.onAfterRender();
-    return index < (this.renderedCount || 0);
-  }
-  setupObserver() {
-    const el = this.el;
-    if (!el) return;
-    this.disconnectObserver();
-    this.onScroll = () => this.scheduleScrollCheck();
-    el.addEventListener("scroll", this.onScroll, { passive: true });
-    const win = getElementWindow(el);
-    if (win && typeof win.IntersectionObserver === "function") {
-      this.observer = new win.IntersectionObserver(
-        (entries) => {
-          if (entries.some((entry) => entry.isIntersecting)) {
-            this.maybeRenderMore({ force: true });
-          }
-        },
-        {
-          root: el,
-          rootMargin: `0px 0px ${RESULT_RENDER_AHEAD_PX}px 0px`,
-          threshold: 0
-        }
-      );
-    }
-  }
-  disconnectObserver() {
-    if (this.observer) this.observer.disconnect();
-    this.observer = null;
-    this.cancelScrollCheck();
-    if (this.el && this.onScroll) {
-      this.el.removeEventListener("scroll", this.onScroll);
-    }
-    this.onScroll = null;
-    this.sentinelEl = null;
-    this.spacerEl = null;
-    this.moreBtnEl = null;
-  }
-  scheduleScrollCheck() {
-    const el = this.el;
-    if (!el || this.scrollFrame != null) return;
-    const win = getElementWindow(el);
-    this.scrollWindow = win;
-    this.scrollFrame = win.requestAnimationFrame(() => {
-      this.scrollFrame = null;
-      this.scrollWindow = null;
-      this.maybeRenderMore();
-    });
-  }
-  cancelScrollCheck() {
-    if (this.scrollFrame == null) return;
-    const win = this.scrollWindow || (this.el ? getElementWindow(this.el) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.scrollFrame);
-    }
-    this.scrollFrame = null;
-    this.scrollWindow = null;
-  }
-  clearTail() {
-    if (this.sentinelEl) {
-      if (this.observer) this.observer.unobserve(this.sentinelEl);
-      this.sentinelEl.remove();
-      this.sentinelEl = null;
-    }
-    if (this.spacerEl) {
-      this.spacerEl.remove();
-      this.spacerEl = null;
-    }
-    if (this.moreBtnEl) {
-      this.moreBtnEl.remove();
-      this.moreBtnEl = null;
-    }
-  }
-  updateAverageHeight(totalRowsHeight, renderedCount) {
-    if (renderedCount <= 0 || totalRowsHeight <= 0) return;
-    const sample = totalRowsHeight / renderedCount;
-    if (!Number.isFinite(sample) || sample < 12) return;
-    this.averageRowHeight = sample;
-  }
-  updateTail() {
-    const el = this.el;
-    if (!el || !this.itemCount) return;
-    this.clearTail();
-    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    const rendered = this.renderedCount || 0;
-    if (rendered < limit) {
-      this.sentinelEl = el.createDiv({ cls: "lf-sentinel" });
-      if (this.observer) this.observer.observe(this.sentinelEl);
-      this.spacerEl = el.createDiv({ cls: "lf-spacer" });
-      this.spacerEl.style.height = `${Math.max(
-        0,
-        Math.round(
-          (limit - rendered) * (this.averageRowHeight || DEFAULT_RESULT_ROW_HEIGHT)
-        )
-      )}px`;
-    }
-    if (limit < this.itemCount) {
-      this.moreBtnEl = el.createEl("button", { cls: "lf-btn lf-more-btn" });
-      this.moreBtnEl.setText(`Show more (${this.itemCount - limit} hidden)`);
-      this.moreBtnEl.onclick = () => this.expandCap();
-    }
-  }
-  expandCap() {
-    if (!this.el || this.displayLimit >= this.itemCount) return;
-    this.displayLimit = Math.min(
-      this.itemCount,
-      this.displayLimit + RESULT_DISPLAY_CAP
-    );
-    this.renderLimit = Math.max(
-      this.renderLimit || RESULT_RENDER_BATCH,
-      (this.renderedCount || 0) + RESULT_RENDER_BATCH
-    );
-    if (!this.renderChunk(this.renderLimit)) this.updateTail();
-    if (this.onAfterRender) this.onAfterRender();
-    this.schedulePrefetch();
-  }
-  isNearBottom() {
-    const el = this.el;
-    if (!el) return false;
-    const tailTop = this.sentinelEl ? this.sentinelEl.offsetTop : el.scrollHeight;
-    return el.scrollTop + el.clientHeight >= tailTop - RESULT_RENDER_AHEAD_PX;
-  }
-  maybeRenderMore(options = {}) {
-    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    if (!this.el || !this.itemCount || (this.renderedCount || 0) >= limit) return;
-    if (!options.force && !this.isNearBottom()) return;
-    this.renderLimit = Math.min(
-      limit,
-      Math.max(
-        this.renderLimit || RESULT_RENDER_BATCH,
-        (this.renderedCount || 0) + RESULT_RENDER_BATCH
-      )
-    );
-    if (this.renderChunk(this.renderLimit)) {
-      if (this.onAfterRender) this.onAfterRender();
-      this.schedulePrefetch();
-      if (this.isNearBottom()) this.scheduleCatchup();
-    }
-  }
-  schedulePrefetch() {
-    const el = this.el;
-    if (!el || this.prefetchId != null || !this.itemCount) return;
-    const cap = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-    if ((this.renderedCount || 0) >= cap) return;
-    const win = getElementWindow(el);
-    const token = this.renderToken;
-    const run = () => {
-      this.prefetchId = null;
-      this.prefetchKind = null;
-      this.prefetchWindow = null;
-      if (token !== this.renderToken || !this.el || !this.itemCount) return;
-      const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
-      if ((this.renderedCount || 0) >= limit) return;
-      const scrollTop = this.el.scrollTop;
-      const target = Math.min(
-        limit,
-        (this.renderedCount || 0) + RESULT_IDLE_PREFETCH_BATCH
-      );
-      if (this.renderChunk(target)) {
-        this.el.scrollTop = scrollTop;
-        if (this.onAfterRender) this.onAfterRender();
-      }
-      this.schedulePrefetch();
     };
-    if (win && typeof win.requestIdleCallback === "function") {
-      this.prefetchKind = "idle";
-      this.prefetchId = win.requestIdleCallback(run, { timeout: 350 });
-    } else {
-      this.prefetchKind = "timeout";
-      this.prefetchId = win.setTimeout(run, 80);
-    }
-    this.prefetchWindow = win;
   }
-  cancelPrefetch() {
-    if (this.prefetchId == null) return;
-    const win = this.prefetchWindow || (this.el ? getElementWindow(this.el) : null);
-    if (this.prefetchKind === "idle" && win && typeof win.cancelIdleCallback === "function") {
-      win.cancelIdleCallback(this.prefetchId);
-    } else if (win && typeof win.clearTimeout === "function") {
-      win.clearTimeout(this.prefetchId);
-    }
-    this.prefetchId = null;
-    this.prefetchKind = null;
-    this.prefetchWindow = null;
+  configureVirtualizer(count) {
+    if (!this.virtualizer) return;
+    this.virtualizer.setOptions(this.virtualizerOptions(count));
+    this.virtualizer._willUpdate();
   }
-  scheduleCatchup() {
-    const el = this.el;
-    if (!el || this.catchupFrame != null) return;
-    const win = getElementWindow(el);
-    this.catchupWindow = win;
-    this.catchupFrame = win.requestAnimationFrame(() => {
-      this.catchupFrame = null;
-      this.catchupWindow = null;
-      this.maybeRenderMore();
-    });
-  }
-  cancelCatchup() {
-    if (this.catchupFrame == null) return;
-    const win = this.catchupWindow || (this.el ? getElementWindow(this.el) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.catchupFrame);
+  rebuildRows() {
+    this.rows = [];
+    this.matchRowByIndex = /* @__PURE__ */ new Map();
+    this.groupInfo = this.getGroupInfo ? this.getGroupInfo() : null;
+    let lastGroupKey = null;
+    for (let i = 0; i < this.itemCount; i++) {
+      const groupItem = this.groupInfo && this.groupInfo.items ? this.groupInfo.items[i] : null;
+      if (groupItem && groupItem.key !== lastGroupKey) {
+        lastGroupKey = groupItem.key;
+        this.rows.push({
+          type: "group",
+          key: groupItem.key,
+          group: groupItem.group,
+          totalInGroup: groupItem.totalInGroup
+        });
+      }
+      const rowIndex = this.rows.length;
+      this.matchRowByIndex.set(i, rowIndex);
+      this.rows.push({
+        type: "match",
+        key: `match:${i}`,
+        matchIndex: i,
+        groupKey: groupItem ? groupItem.key : null
+      });
     }
-    this.catchupFrame = null;
-    this.catchupWindow = null;
+  }
+  createDom() {
+    if (!this.el) return;
+    this.stickyEl = createDiv(this.el, "lf-virtual-sticky-group is-hidden");
+    this.innerEl = createDiv(this.el, "lf-virtual-inner");
+  }
+  clearDom() {
+    if (!this.el) return;
+    this.renderedItems.clear();
+    this.innerEl = null;
+    this.stickyEl = null;
+    emptyElement(this.el);
+    if (this.virtualizer) this.virtualizer.measureElement(null);
+  }
+  estimateSize(index) {
+    const row = this.rows[index];
+    return row && row.type === "group" ? GROUP_ROW_HEIGHT : DEFAULT_RESULT_ROW_HEIGHT;
+  }
+  rowKey(index) {
+    const row = this.rows[index];
+    if (!row) return `row:${index}`;
+    return row.type === "group" ? `group:${row.key}` : row.key;
+  }
+  rowIndexForMatch(matchIndex) {
+    const rowIndex = this.matchRowByIndex.get(matchIndex);
+    return Number.isFinite(rowIndex) ? rowIndex : -1;
   }
   current() {
     const current = this.getCurrent ? this.getCurrent() : -1;
     return Number.isFinite(current) ? current : -1;
   }
-  setActive(index, options = {}) {
-    if (!this.el) return;
-    const shouldScroll = options.scroll !== false;
-    this.ensureRendered(index);
-    const previous = this.activeRow && this.activeRow.isConnected ? this.activeRow : null;
-    const row = index >= 0 ? this.el.querySelector(`.lf-row[data-match-index="${index}"]`) : null;
-    if (previous && previous !== row) previous.classList.remove("is-active");
-    if (row) {
-      row.classList.add("is-active");
-      if (shouldScroll) {
-        row.scrollIntoView({
-          block: options.block || "nearest",
-          inline: "nearest"
-        });
+  scheduleRender() {
+    const el = this.el;
+    if (!el || this.renderFrame != null) return;
+    const win = el.ownerDocument && el.ownerDocument.defaultView || window;
+    this.renderFrame = win.requestAnimationFrame(() => {
+      this.renderFrame = null;
+      this.render();
+    });
+  }
+  cancelRender() {
+    if (this.renderFrame == null || !this.el) {
+      this.renderFrame = null;
+      return;
+    }
+    const win = this.el.ownerDocument && this.el.ownerDocument.defaultView || window;
+    win.cancelAnimationFrame(this.renderFrame);
+    this.renderFrame = null;
+  }
+  render() {
+    if (!this.el || !this.innerEl || !this.virtualizer) return;
+    const virtualItems = this.virtualizer.getVirtualItems();
+    const totalSize = this.virtualizer.getTotalSize();
+    this.innerEl.style.height = `${Math.max(0, totalSize)}px`;
+    const liveKeys = /* @__PURE__ */ new Set();
+    for (const virtualRow of virtualItems) {
+      const key = String(virtualRow.key);
+      liveKeys.add(key);
+      let itemEl = this.renderedItems.get(key);
+      if (!itemEl) {
+        itemEl = createDiv(this.innerEl, "lf-virtual-item");
+        this.renderedItems.set(key, itemEl);
+      }
+      itemEl.dataset.index = String(virtualRow.index);
+      itemEl.style.transform = `translateY(${virtualRow.start}px)`;
+      if (itemEl.dataset.rowKey !== key) {
+        itemEl.dataset.rowKey = key;
+        this.renderVirtualRow(itemEl, virtualRow.index);
+      }
+      this.virtualizer.measureElement(itemEl);
+    }
+    for (const [key, itemEl] of this.renderedItems) {
+      if (liveKeys.has(key)) continue;
+      itemEl.remove();
+      this.renderedItems.delete(key);
+    }
+    this.virtualizer.measureElement(null);
+    this.updateStickyGroup(virtualItems);
+    this.applyActiveClass(false);
+    if (this.onAfterRender) this.onAfterRender();
+  }
+  renderVirtualRow(itemEl, rowIndex) {
+    const row = this.rows[rowIndex];
+    emptyElement(itemEl);
+    if (!row) return;
+    if (row.type === "group") {
+      this.renderGroup(itemEl, row);
+      return;
+    }
+    const state = {
+      lastGroupKey: row.groupKey,
+      suppressGroupHeader: true
+    };
+    const rendered = this.renderRow ? this.renderRow(row.matchIndex, this.groupInfo, state, itemEl) : null;
+    if (rendered && row.matchIndex === this.current()) {
+      rendered.addClass ? rendered.addClass("is-active") : rendered.classList.add("is-active");
+      this.activeRow = rendered;
+    }
+  }
+  renderGroup(parent, row) {
+    const groupEl = createDiv(parent, "lf-group");
+    groupEl.dataset.groupKey = row.key;
+    groupEl.dataset.groupTitle = row.group ? row.group.text : "";
+    groupEl.dataset.groupTotal = String(row.totalInGroup || 0);
+    createSpan(groupEl, "lf-group-title", row.group ? row.group.text : "No heading");
+    createSpan(groupEl, "lf-group-count", String(row.totalInGroup || 0));
+  }
+  updateStickyGroup(virtualItems) {
+    if (!this.stickyEl) return;
+    if (!this.groupInfo || !this.rows.length || !virtualItems.length) {
+      setClass(this.stickyEl, "is-hidden", true);
+      emptyElement(this.stickyEl);
+      return;
+    }
+    const first = virtualItems[0];
+    const scrollOffset = this.virtualizer ? this.virtualizer.scrollOffset || 0 : 0;
+    const firstRow = this.rows[first.index];
+    if (firstRow && firstRow.type === "group" && Math.abs(first.start - scrollOffset) < 4) {
+      setClass(this.stickyEl, "is-hidden", true);
+      emptyElement(this.stickyEl);
+      return;
+    }
+    let groupRow = null;
+    for (let i = first.index; i >= 0; i--) {
+      const row = this.rows[i];
+      if (row && row.type === "group") {
+        groupRow = row;
+        break;
       }
     }
+    if (!groupRow) {
+      setClass(this.stickyEl, "is-hidden", true);
+      emptyElement(this.stickyEl);
+      return;
+    }
+    emptyElement(this.stickyEl);
+    this.renderGroup(this.stickyEl, groupRow);
+    setClass(this.stickyEl, "is-hidden", false);
+  }
+  applyActiveClass(scroll) {
+    if (!this.el) return;
+    const current = this.current();
+    const row = current >= 0 ? this.el.querySelector(`.lf-row[data-match-index="${current}"]`) : null;
+    if (this.activeRow && this.activeRow !== row && this.activeRow.isConnected) {
+      this.activeRow.classList.remove("is-active");
+    }
+    if (row) row.classList.add("is-active");
     this.activeRow = row || null;
+    if (scroll && row) {
+      row.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }
+  setActive(index, options = {}) {
+    if (!this.el || !this.virtualizer) return;
+    const rowIndex = this.rowIndexForMatch(index);
+    if (rowIndex < 0) {
+      this.applyActiveClass(false);
+      if (this.onAfterRender) this.onAfterRender();
+      return;
+    }
+    if (options.scroll !== false) {
+      this.virtualizer.scrollToIndex(rowIndex, {
+        align: scrollAlignFromBlock(options.block)
+      });
+    }
+    this.scheduleRender();
+    this.applyActiveClass(false);
     if (this.onAfterRender) this.onAfterRender();
   }
 };
@@ -1418,6 +2747,10 @@ var FindBar = class {
     this.docCache = null;
     this.perfStats = {};
     this.perfSeq = 0;
+    this.renderObserver = null;
+    this.observedRenderRoot = null;
+    this.mutationFrame = null;
+    this.mutationWindow = null;
     this.barEl = null;
     this.resultsEl = null;
   }
@@ -1517,6 +2850,60 @@ var FindBar = class {
     if (this.scroller && this.onScroll) {
       this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
     }
+  }
+  updateRenderObserver() {
+    this.disconnectRenderObserver();
+    if (!this.barEl) return;
+    const root = getRenderRoot(this.view);
+    if (!root) return;
+    const win = getElementWindow(root);
+    if (!win || typeof win.MutationObserver !== "function") return;
+    this.observedRenderRoot = root;
+    this.renderObserver = new win.MutationObserver((mutations) => {
+      const hasNoteMutation = mutations.some((mutation) => {
+        const target = mutation.target;
+        const el = target && target.nodeType === 1 ? target : target && target.parentElement;
+        return !(el && el.closest && el.closest(".lf-find-bar, .lf-results"));
+      });
+      if (!hasNoteMutation) return;
+      this.scheduleRenderedDomRefresh();
+    });
+    this.renderObserver.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+  disconnectRenderObserver() {
+    if (this.renderObserver) this.renderObserver.disconnect();
+    this.renderObserver = null;
+    this.observedRenderRoot = null;
+    this.cancelRenderedDomRefresh();
+  }
+  scheduleRenderedDomRefresh() {
+    if (!this.barEl || !this.query || !this.matcher || this.matcher.invalid)
+      return;
+    if (this.mutationFrame != null) return;
+    const root = this.observedRenderRoot || getRenderRoot(this.view);
+    const win = root ? getElementWindow(root) : getElementWindow(this.barEl);
+    this.mutationWindow = win;
+    this.mutationFrame = win.requestAnimationFrame(() => {
+      this.mutationFrame = null;
+      this.mutationWindow = null;
+      this.refreshHighlights(this.highlightToken, {
+        fromScroll: true,
+        viewportOnly: true
+      });
+    });
+  }
+  cancelRenderedDomRefresh() {
+    if (this.mutationFrame == null) return;
+    const win = this.mutationWindow || (this.observedRenderRoot ? getElementWindow(this.observedRenderRoot) : null) || (this.barEl ? getElementWindow(this.barEl) : null);
+    if (win && typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(this.mutationFrame);
+    }
+    this.mutationFrame = null;
+    this.mutationWindow = null;
   }
   refreshCurrentSearch(options = {}) {
     if (!this.barEl) return;
@@ -1722,7 +3109,7 @@ var FindBar = class {
       getCurrent: () => this.current,
       getGroupInfo: () => this.getMatchGroupInfo(),
       onAfterRender: () => this.updateGroupCounts(),
-      renderRow: (index, groupInfo, state) => this.createResultRow(index, groupInfo, state)
+      renderRow: (index, groupInfo, state, parent) => this.createResultRow(index, groupInfo, state, parent)
     });
     this.updateCount();
     this.onInput = debounce(
@@ -1766,10 +3153,12 @@ var FindBar = class {
       }
     };
     this.input.addEventListener("keydown", this.onKeydown);
-    this.onScroll = throttleFrame(
-      () => this.refreshHighlights(this.highlightToken, { fromScroll: true })
+    this.onScroll = throttle(
+      () => this.refreshHighlights(this.highlightToken, { fromScroll: true }),
+      SCROLL_HIGHLIGHT_THROTTLE_MS
     );
     this.updateScroller();
+    this.updateRenderObserver();
     this.lastViewMode = this.viewModeKey();
     this.layoutEvt = this.plugin.app.workspace.on("layout-change", () => {
       if (!this.barEl) return;
@@ -1777,6 +3166,7 @@ var FindBar = class {
       if (mode === this.lastViewMode) return;
       this.lastViewMode = mode;
       this.updateScroller();
+      this.updateRenderObserver();
       this.refreshCurrentSearch({ preserveCurrent: true });
     });
     this.onEditorChange = debounce(() => {
@@ -1824,6 +3214,7 @@ var FindBar = class {
       this.scroller.removeEventListener("scroll", this.onScroll);
     }
     this.scroller = null;
+    this.disconnectRenderObserver();
     if (this.resultList) this.resultList.destroy();
     this.resultList = null;
     if (this.layoutEvt) this.plugin.app.workspace.offref(this.layoutEvt);
@@ -1879,7 +3270,7 @@ var FindBar = class {
       ) : null;
       if (!cur && this.currentDomRange && this.currentDomRange.startContainer && this.currentDomRange.startContainer.isConnected)
         cur = this.currentDomRange;
-      const domOptions2 = fromScroll || options.viewportOnly ? { scroller: scroller2, viewportMargin: 3e3 } : {};
+      const domOptions2 = fromScroll || options.viewportOnly ? { scroller: scroller2, viewportMargin: DOM_HIGHLIGHT_VIEWPORT_MARGIN } : {};
       let dom2 = findRenderedMatches(root2, this.matcher, domOptions2);
       if (!cur && dom2.length) {
         const rect = scroller2 ? scroller2.getBoundingClientRect() : { top: 0 };
@@ -1934,7 +3325,7 @@ var FindBar = class {
           );
         if (!currentRange) currentRange = resolveByDomAtPos(cm, off, this.matcher);
         if (!currentRange) {
-          const domOptions2 = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3e3 } : {};
+          const domOptions2 = fromScroll || options.viewportOnly ? { scroller, viewportMargin: DOM_HIGHLIGHT_VIEWPORT_MARGIN } : {};
           dom = findRenderedMatches(root, this.matcher, domOptions2);
           let coords = null;
           try {
@@ -1960,7 +3351,7 @@ var FindBar = class {
         }
       }
     }
-    const domOptions = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3e3 } : {};
+    const domOptions = fromScroll || options.viewportOnly ? { scroller, viewportMargin: DOM_HIGHLIGHT_VIEWPORT_MARGIN } : {};
     if (!dom) dom = findRenderedMatches(root, this.matcher, domOptions);
     this.currentDomRange = currentRange;
     dom = limitDomHighlightsAroundCurrent(
@@ -2174,13 +3565,14 @@ var FindBar = class {
     el.style.display = "block";
     this.resultList.setItems(this.matches.length, this.current);
   }
-  createResultRow(i, groupInfo, state) {
-    const el = this.resultsEl;
+  createResultRow(i, groupInfo, state, parent = null) {
+    const el = parent || this.resultsEl;
     if (!el) return null;
+    state = state || {};
     const m = this.matches[i];
     const groupItem = groupInfo ? groupInfo.items[i] : null;
     const group = groupItem ? groupItem.group : null;
-    if (groupItem && groupItem.key !== state.lastGroupKey) {
+    if (groupItem && groupItem.key !== state.lastGroupKey && !(state && state.suppressGroupHeader)) {
       state.lastGroupKey = groupItem.key;
       const groupEl = el.createDiv({ cls: "lf-group" });
       groupEl.dataset.groupKey = groupItem.key;

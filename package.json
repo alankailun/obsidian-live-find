@@ -5,5 +5,8 @@
   },
   "devDependencies": {
     "esbuild": "0.25.12"
+  },
+  "dependencies": {
+    "@tanstack/virtual-core": "^3.17.3"
   }
 }
