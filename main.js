@@ -1,88 +1,82 @@
-"use strict";
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-const { Plugin, MarkdownView, Notice, setIcon, Menu } = require("obsidian");
+// src/main.js
+var main_exports = {};
+__export(main_exports, {
+  default: () => LiveFindPlugin
+});
+module.exports = __toCommonJS(main_exports);
+var import_obsidian2 = require("obsidian");
 
-const HL_ALL = "live-find-all";
-const HL_CURRENT = "live-find-current";
-
-// Hard-coded knobs. Flip DEBUG to true while developing; the others are
-// reasonable defaults — adjust here if you ever need to tune them.
-const DEBUG = false;
-const DEBOUNCE_MS = 100;
-const MAX_DOM_HIGHLIGHTS = 2500;
-const RESULT_RENDER_BATCH = 150;
-const RESULT_RENDER_AHEAD_PX = 900;
-const RESULT_IDLE_PREFETCH_BATCH = 75;
-const RESULT_IDLE_PREFETCH_LIMIT = 600;
-const DEFAULT_RESULT_ROW_HEIGHT = 42;
-
-const SELECTORS = {
+// src/constants.js
+var HL_ALL = "live-find-all";
+var HL_CURRENT = "live-find-current";
+var DEBUG = false;
+var DEBOUNCE_MS = 100;
+var MAX_DOM_HIGHLIGHTS = 2500;
+var RESULT_RENDER_BATCH = 150;
+var RESULT_RENDER_AHEAD_PX = 900;
+var RESULT_IDLE_PREFETCH_BATCH = 75;
+var RESULT_DISPLAY_CAP = 5e3;
+var DEFAULT_RESULT_ROW_HEIGHT = 42;
+var SELECTORS = {
   readingRoot: ".markdown-reading-view, .markdown-preview-view",
   editorRoot: ".cm-content",
-  scroller: ".cm-scroller, .markdown-preview-view",
+  scroller: ".cm-scroller, .markdown-preview-view"
 };
-
-const DEFAULT_FIND_OPTIONS = {
+var DEFAULT_FIND_OPTIONS = {
   caseSensitive: false,
   useRegex: false,
   wholeWord: false,
   groupResults: false,
   headingGroupLevel: 2,
   showResultHeadings: true,
-  jumpNearest: true,
+  jumpNearest: true
 };
-
 function normalizeHeadingGroupLevel(value) {
   const n = Number(value);
   if (Number.isInteger(n) && n >= 1 && n <= 6) return n;
   return DEFAULT_FIND_OPTIONS.headingGroupLevel;
 }
-
 function headingLevelLabel(level) {
   return `H${normalizeHeadingGroupLevel(level)}`;
 }
-
 function headingLevelMenuLabel(level) {
   return `Heading ${normalizeHeadingGroupLevel(level)}`;
 }
-
 function normalizeFindOptions(options) {
   const src = options && typeof options === "object" ? options : {};
   const savedRemovedTopLevel = src.headingGroupLevel === "top";
   return {
-    caseSensitive:
-      typeof src.caseSensitive === "boolean"
-        ? src.caseSensitive
-        : DEFAULT_FIND_OPTIONS.caseSensitive,
-    useRegex:
-      typeof src.useRegex === "boolean"
-        ? src.useRegex
-        : DEFAULT_FIND_OPTIONS.useRegex,
-    wholeWord:
-      typeof src.wholeWord === "boolean"
-        ? src.wholeWord
-        : DEFAULT_FIND_OPTIONS.wholeWord,
-    groupResults:
-      typeof src.groupResults === "boolean"
-        ? src.groupResults && !savedRemovedTopLevel
-        : DEFAULT_FIND_OPTIONS.groupResults,
+    caseSensitive: typeof src.caseSensitive === "boolean" ? src.caseSensitive : DEFAULT_FIND_OPTIONS.caseSensitive,
+    useRegex: typeof src.useRegex === "boolean" ? src.useRegex : DEFAULT_FIND_OPTIONS.useRegex,
+    wholeWord: typeof src.wholeWord === "boolean" ? src.wholeWord : DEFAULT_FIND_OPTIONS.wholeWord,
+    groupResults: typeof src.groupResults === "boolean" ? src.groupResults && !savedRemovedTopLevel : DEFAULT_FIND_OPTIONS.groupResults,
     headingGroupLevel: normalizeHeadingGroupLevel(src.headingGroupLevel),
-    showResultHeadings:
-      typeof src.showResultHeadings === "boolean"
-        ? src.showResultHeadings
-        : DEFAULT_FIND_OPTIONS.showResultHeadings,
-    jumpNearest:
-      typeof src.jumpNearest === "boolean"
-        ? src.jumpNearest
-        : DEFAULT_FIND_OPTIONS.jumpNearest,
+    showResultHeadings: typeof src.showResultHeadings === "boolean" ? src.showResultHeadings : DEFAULT_FIND_OPTIONS.showResultHeadings,
+    jumpNearest: typeof src.jumpNearest === "boolean" ? src.jumpNearest : DEFAULT_FIND_OPTIONS.jumpNearest
   };
 }
-
 function debugWarn(where, err) {
   if (!DEBUG) return;
   console.warn(`[LiveFind] ${where}`, err);
 }
-
 function debounce(fn, ms) {
   let t;
   const wrapped = (...args) => {
@@ -95,39 +89,47 @@ function debounce(fn, ms) {
   };
   return wrapped;
 }
+function throttleFrame(fn) {
+  let queued = false;
+  return (...args) => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      fn(...args);
+    });
+  };
+}
 
-/* ----------------------------- matching engine ----------------------------- */
+// src/find-bar.js
+var import_obsidian = require("obsidian");
 
-const TOKEN_CHAR_RE = (() => {
+// src/matcher.js
+var TOKEN_CHAR_RE = (() => {
   try {
     return new RegExp("[\\p{L}\\p{M}\\p{N}_]", "u");
   } catch (e) {
     return /[A-Za-z0-9_]/;
   }
 })();
-
-const BOUNDARYLESS_SCRIPT_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/;
-
+var BOUNDARYLESS_SCRIPT_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/;
 function normalizePlainQuery(query) {
   return (query || "").trim();
 }
-
-/** Build a matcher from query + flags. Returns null if no query. */
 function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
   if (!query) return null;
   if (useRegex) {
-    const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(query);
+    const useWordBoundaries2 = !!wholeWord && queryUsesWordBoundaries(query);
     try {
       return {
         regex: new RegExp(query, "g" + (caseSensitive ? "" : "i")),
         wholeWord: !!wholeWord,
-        useWordBoundaries,
+        useWordBoundaries: useWordBoundaries2
       };
     } catch (e) {
       return { invalid: true, error: e && e.message ? e.message : "Invalid regular expression" };
     }
   }
-
   const plainQuery = normalizePlainQuery(query);
   if (!plainQuery) return null;
   const useWordBoundaries = !!wholeWord && queryUsesWordBoundaries(plainQuery);
@@ -135,29 +137,24 @@ function buildMatcher(query, caseSensitive, useRegex, wholeWord) {
     needle: caseSensitive ? plainQuery : plainQuery.toLowerCase(),
     caseSensitive,
     wholeWord: !!wholeWord,
-    useWordBoundaries,
+    useWordBoundaries
   };
 }
-
 function isBoundarylessScriptChar(ch) {
   return !!ch && BOUNDARYLESS_SCRIPT_RE.test(ch);
 }
-
 function isSearchTokenChar(ch) {
   return !!ch && TOKEN_CHAR_RE.test(ch) && !isBoundarylessScriptChar(ch);
 }
-
 function edgeCharBefore(text, index) {
   if (index <= 0) return "";
   const chars = [...text.slice(Math.max(0, index - 2), index)];
   return chars[chars.length - 1] || "";
 }
-
 function edgeCharAfter(text, index) {
   if (index >= text.length) return "";
   return [...text.slice(index, index + 2)][0] || "";
 }
-
 function queryUsesWordBoundaries(query) {
   let hasTokenChar = false;
   for (const ch of query) {
@@ -166,16 +163,10 @@ function queryUsesWordBoundaries(query) {
   }
   return hasTokenChar;
 }
-
 function isWholeWordMatch(text, index, length, matcher) {
   if (!matcher.useWordBoundaries) return true;
-  return (
-    !isSearchTokenChar(edgeCharBefore(text, index)) &&
-    !isSearchTokenChar(edgeCharAfter(text, index + length))
-  );
+  return !isSearchTokenChar(edgeCharBefore(text, index)) && !isSearchTokenChar(edgeCharAfter(text, index + length));
 }
-
-/** Find every match of matcher in text. Returns [{ index, length }]. */
 function findAll(text, matcher) {
   const out = [];
   if (!text || !matcher || matcher.invalid) return out;
@@ -204,61 +195,6 @@ function findAll(text, matcher) {
   }
   return out;
 }
-
-/* ----------------------------- view helpers ----------------------------- */
-
-function getRenderRoot(view) {
-  if (!view || !view.containerEl || typeof view.getMode !== "function") return null;
-  const mode = view.getMode();
-  return view.containerEl.querySelector(
-    mode === "preview" ? SELECTORS.readingRoot : SELECTORS.editorRoot
-  );
-}
-
-function isLivePreviewMode(view) {
-  if (!view || !view.containerEl || typeof view.getMode !== "function") return false;
-  if (view.getMode() !== "source") return false;
-  return !!view.containerEl.querySelector(".markdown-source-view.is-live-preview");
-}
-
-function getScroller(view) {
-  if (!view || !view.containerEl) return null;
-  return view.containerEl.querySelector(SELECTORS.scroller);
-}
-
-function getEditorView(editor) {
-  return editor && editor.cm ? editor.cm : null;
-}
-
-function getElementDocument(el) {
-  return (el && el.ownerDocument) || document;
-}
-
-function getElementWindow(el) {
-  const doc = getElementDocument(el);
-  return (doc && doc.defaultView) || window;
-}
-
-function getViewDocument(view) {
-  return (view && view.containerEl && view.containerEl.ownerDocument) || document;
-}
-
-function getViewWindow(view) {
-  const doc = getViewDocument(view);
-  return (doc && doc.defaultView) || window;
-}
-
-function getHighlightSupport(view) {
-  const win = getViewWindow(view);
-  const css = win && win.CSS;
-  if (!css || !css.highlights || !win.Highlight) return null;
-  return {
-    Highlight: win.Highlight,
-    registry: css.highlights,
-  };
-}
-
-/** Complete, viewport-independent search of the note SOURCE. */
 function findSourceMatches(lines, matcher) {
   const res = [];
   if (!matcher || matcher.invalid) return res;
@@ -271,151 +207,14 @@ function findSourceMatches(lines, matcher) {
   return res;
 }
 
-/** Occurrences in the currently-rendered DOM (for highlighting). */
-function findRenderedMatches(root, matcher) {
-  const matches = [];
-  if (!root || !matcher || matcher.invalid) return matches;
-  const doc = getElementDocument(root);
-  const win = getElementWindow(root);
-  const filter = win.NodeFilter;
-  const walker = doc.createTreeWalker(root, filter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (!node.nodeValue || !node.nodeValue.trim())
-        return filter.FILTER_REJECT;
-      const tag = node.parentElement && node.parentElement.tagName;
-      if (tag === "SCRIPT" || tag === "STYLE") return filter.FILTER_REJECT;
-      return filter.FILTER_ACCEPT;
-    },
-  });
-  let node;
-  while ((node = walker.nextNode())) {
-    const text = node.nodeValue;
-    for (const mt of findAll(text, matcher)) {
-      const range = doc.createRange();
-      range.setStart(node, mt.index);
-      range.setEnd(node, mt.index + mt.length);
-      matches.push({
-        range,
-        el: node.parentElement,
-        text,
-        index: mt.index,
-        length: mt.length,
-      });
-    }
-  }
-  return matches;
-}
-
-function rangeCenterY(range) {
-  try {
-    if (!range) return null;
-    const rect = range.getBoundingClientRect();
-    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return null;
-    return (rect.top + rect.bottom) / 2;
-  } catch (e) {
-    debugWarn("rangeCenterY", e);
-    return null;
-  }
-}
-
-function viewportCenterY(scroller) {
-  try {
-    if (!scroller || typeof scroller.getBoundingClientRect !== "function") return null;
-    const rect = scroller.getBoundingClientRect();
-    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return null;
-    return (rect.top + rect.bottom) / 2;
-  } catch (e) {
-    debugWarn("viewportCenterY", e);
-    return null;
-  }
-}
-
-function scrollRangeIntoView(range) {
-  try {
-    if (!range || !range.startContainer) return false;
-    const node = range.startContainer;
-    const el =
-      node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-    if (!el || typeof el.scrollIntoView !== "function") return false;
-    const target =
-      (el.closest &&
-        el.closest(
-          ".cm-line, td, th, tr, p, li, h1, h2, h3, h4, h5, h6, dd, dt, blockquote"
-        )) ||
-      el;
-    target.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
-    return true;
-  } catch (e) {
-    debugWarn("scrollRangeIntoView", e);
-    return false;
-  }
-}
-
-function centerEditorOffset(view, editor, off) {
-  try {
-    const cm = getEditorView(editor);
-    const scroller = getScroller(view) || (cm && cm.scrollDOM);
-    if (
-      !cm ||
-      typeof cm.coordsAtPos !== "function" ||
-      !scroller ||
-      off == null
-    )
-      return false;
-    const coords = cm.coordsAtPos(off);
-    if (!coords) return false;
-    const rect = scroller.getBoundingClientRect();
-    const targetY = rect.top + rect.height / 2;
-    const currentY = (coords.top + coords.bottom) / 2;
-    const delta = currentY - targetY;
-    if (!Number.isFinite(delta)) return false;
-    scroller.scrollTop += delta;
-    return true;
-  } catch (e) {
-    debugWarn("centerEditorOffset", e);
-    return false;
-  }
-}
-
-/**
- * Keep the rendered yellow highlights centered around the current orange match.
- * The search count/list still comes from the full note source; this only limits
- * how many DOM ranges are sent to the CSS Highlight API at once.
- */
-function limitDomHighlightsAroundCurrent(dom, currentRange, max, scroller) {
-  if (!Array.isArray(dom) || !dom.length) return [];
-  const n = Number(max);
-  if (!Number.isFinite(n) || n <= 0 || dom.length <= n) return dom;
-
-  const centerY = rangeCenterY(currentRange) ?? viewportCenterY(scroller);
-  if (centerY == null) return dom.slice(0, n);
-
-  return dom
-    .map((d, i) => {
-      const y = rangeCenterY(d.range);
-      return {
-        item: d,
-        index: i,
-        dist: y == null ? Infinity : Math.abs(y - centerY),
-      };
-    })
-    .sort((a, b) => a.dist - b.dist || a.index - b.index)
-    .slice(0, n)
-    .sort((a, b) => a.index - b.index)
-    .map((x) => x.item);
-}
-
-/* ----------------------------- table cell mapping ----------------------------- */
-
+// src/tables.js
 function isTableRow(line) {
   const t = line.trim();
   return t.startsWith("|") && t.includes("|", 1);
 }
-
 function isDelimiterRow(line) {
   return /^\s*\|?[\s:|\-]+\|?\s*$/.test(line) && line.includes("-");
 }
-
 function parseCells(line) {
   const cells = [];
   let cur = "";
@@ -438,8 +237,8 @@ function parseCells(line) {
   cells.push({ text: cur, start });
   return cells;
 }
-
-function locateInTables(lines, lineIdx) {
+function buildTableLookup(lines) {
+  const lookup = new Array(lines.length).fill(null);
   let tableIdx = -1;
   let i = 0;
   while (i < lines.length) {
@@ -447,11 +246,49 @@ function locateInTables(lines, lineIdx) {
       i++;
       continue;
     }
-
     const blockStart = i;
     let j = i;
     while (j < lines.length && isTableRow(lines[j])) j++;
-
+    let delimLine = -1;
+    for (let k = blockStart; k < j; k++) {
+      if (isDelimiterRow(lines[k])) {
+        delimLine = k;
+        break;
+      }
+    }
+    if (delimLine !== -1) {
+      tableIdx++;
+      const block = { tableIdx, blockStart, blockEnd: j, delimLine };
+      for (let k = blockStart; k < j; k++) lookup[k] = block;
+    }
+    i = j;
+  }
+  return lookup;
+}
+function locateInTables(lines, lineIdx, lookup) {
+  if (lookup) {
+    const block = lookup[lineIdx];
+    if (!block) return null;
+    if (lineIdx === block.blockStart)
+      return { tableIdx: block.tableIdx, kind: "header" };
+    if (lineIdx === block.delimLine)
+      return { tableIdx: block.tableIdx, kind: "delim" };
+    return {
+      tableIdx: block.tableIdx,
+      kind: "body",
+      bodyRowIdx: lineIdx - block.delimLine - 1
+    };
+  }
+  let tableIdx = -1;
+  let i = 0;
+  while (i < lines.length) {
+    if (!isTableRow(lines[i])) {
+      i++;
+      continue;
+    }
+    const blockStart = i;
+    let j = i;
+    while (j < lines.length && isTableRow(lines[j])) j++;
     let delimOffset = -1;
     for (let k = blockStart; k < j; k++) {
       if (isDelimiterRow(lines[k])) {
@@ -459,14 +296,10 @@ function locateInTables(lines, lineIdx) {
         break;
       }
     }
-
-    // A real Markdown table needs a delimiter row. Avoid treating code / ASCII
-    // art / arbitrary pipe-prefixed lines as tables.
     if (delimOffset === -1) {
       i = j;
       continue;
     }
-
     tableIdx++;
     if (lineIdx >= blockStart && lineIdx < j) {
       const offset = lineIdx - blockStart;
@@ -479,14 +312,12 @@ function locateInTables(lines, lineIdx) {
   }
   return null;
 }
-
 function cellInfoForMatch(line, ch, matcher) {
   const cells = parseCells(line);
   let dataCol = -1;
   for (let c = 0; c < cells.length; c++) {
     const cell = cells[c];
-    const isEdgeEmpty =
-      (c === 0 || c === cells.length - 1) && cell.text.trim() === "";
+    const isEdgeEmpty = (c === 0 || c === cells.length - 1) && cell.text.trim() === "";
     if (!isEdgeEmpty) dataCol++;
     const start = cell.start;
     const end = start + cell.text.length;
@@ -502,14 +333,440 @@ function cellInfoForMatch(line, ch, matcher) {
   }
   return null;
 }
+function tableDataCells(line) {
+  const raw = parseCells(line);
+  const out = [];
+  let dataCol = -1;
+  for (let i = 0; i < raw.length; i++) {
+    const cell = raw[i];
+    const isEdgeEmpty = (i === 0 || i === raw.length - 1) && cell.text.trim() === "";
+    if (isEdgeEmpty) continue;
+    dataCol++;
+    out.push({ ...cell, dataCol });
+  }
+  return out;
+}
+function tableBlockForLine(lines, lineIdx, lookup) {
+  if (lookup) {
+    const block = lookup[lineIdx];
+    if (!block) return null;
+    return {
+      blockStart: block.blockStart,
+      blockEnd: block.blockEnd,
+      headerLine: block.blockStart,
+      delimLine: block.delimLine
+    };
+  }
+  let i = 0;
+  while (i < lines.length) {
+    if (!isTableRow(lines[i])) {
+      i++;
+      continue;
+    }
+    const blockStart = i;
+    let j = i;
+    while (j < lines.length && isTableRow(lines[j])) j++;
+    let delimLine = -1;
+    for (let k = blockStart; k < j; k++) {
+      if (isDelimiterRow(lines[k])) {
+        delimLine = k;
+        break;
+      }
+    }
+    if (delimLine !== -1 && lineIdx >= blockStart && lineIdx < j) {
+      return { blockStart, blockEnd: j, headerLine: blockStart, delimLine };
+    }
+    i = j;
+  }
+  return null;
+}
 
+// src/markdown.js
+function isWordSep(ch) {
+  if (!ch) return true;
+  if (/\s/.test(ch)) return true;
+  if (ch === "|" || ch === "\u2502") return true;
+  const code = ch.charCodeAt(0);
+  if (code >= 12288 && code <= 12351) return true;
+  if (code >= 65280 && code <= 65519) return true;
+  if (code >= 19968 && code <= 40959) return true;
+  return false;
+}
+function wordStartBefore(text, idx) {
+  let i = idx;
+  while (i > 0 && !isWordSep(text.charAt(i - 1))) i--;
+  return i;
+}
+function extendPrefixWords(text, start, n) {
+  let cursor = start;
+  while (n > 0 && cursor > 0) {
+    let p = cursor;
+    while (p > 0 && isWordSep(text.charAt(p - 1)) && text.charAt(p - 1) !== "|") p--;
+    if (p === cursor) break;
+    if (p > 0 && text.charAt(p - 1) === "|") break;
+    const end = p;
+    while (p > 0 && !isWordSep(text.charAt(p - 1))) p--;
+    if (p === end) break;
+    cursor = p;
+    n--;
+  }
+  return cursor;
+}
+function imageSpansIn(line) {
+  const spans = [];
+  let re = /!\[\[[^\]\n]*\]\]/g;
+  let m;
+  while ((m = re.exec(line)) !== null)
+    spans.push([m.index, m.index + m[0].length]);
+  re = /!\[[^\]\n]*\]\([^)\n]*\)/g;
+  while ((m = re.exec(line)) !== null)
+    spans.push([m.index, m.index + m[0].length]);
+  return spans;
+}
+function hiddenSpansInReading(line) {
+  const spans = [...imageSpansIn(line)];
+  let m;
+  const mdLink = /(?<!!)\[([^\]\n]*)\]\(([^)\n]*)\)/g;
+  while ((m = mdLink.exec(line)) !== null) {
+    const textStart = m.index + 1;
+    const textEnd = textStart + m[1].length;
+    spans.push([m.index, textStart]);
+    spans.push([textEnd, m.index + m[0].length]);
+  }
+  const wiki = /(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g;
+  while ((m = wiki.exec(line)) !== null) {
+    if (m[2] != null) {
+      const aliasStart = m.index + m[0].indexOf("|") + 1;
+      const aliasEnd = m.index + m[0].length - 2;
+      spans.push([m.index, aliasStart]);
+      spans.push([aliasEnd, m.index + m[0].length]);
+    } else {
+      spans.push([m.index, m.index + 2]);
+      spans.push([m.index + m[0].length - 2, m.index + m[0].length]);
+    }
+  }
+  return spans.sort((a, b) => a[0] - b[0]);
+}
+function isInsideSpan(ch, spans) {
+  for (const [a, b] of spans) if (ch >= a && ch < b) return true;
+  return false;
+}
+function parseHeading(line, lineIdx) {
+  const m = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line || "");
+  if (!m) return null;
+  return { level: m[1].length, text: m[2], line: lineIdx };
+}
+function buildHeadingLookup(lines) {
+  const parsed = new Array(lines.length);
+  for (let i = 0; i < lines.length; i++) parsed[i] = parseHeading(lines[i], i);
+  const byLevel = [];
+  for (let level = 1; level <= 6; level++) {
+    const arr = new Array(lines.length);
+    let current = null;
+    for (let i = 0; i < lines.length; i++) {
+      const h = parsed[i];
+      if (h && h.level <= level) current = h;
+      arr[i] = current;
+    }
+    byLevel[level] = arr;
+  }
+  return byLevel;
+}
+function nearestHeading(lines, lineIdx, maxLevel = 6, lookup) {
+  if (lookup && lookup[maxLevel]) return lookup[maxLevel][lineIdx] || null;
+  for (let i = lineIdx; i >= 0; i--) {
+    const heading = parseHeading(lines[i], i);
+    if (heading && heading.level <= maxLevel) return heading;
+  }
+  return null;
+}
+function cleanHeadingText(text) {
+  return (text || "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
+}
+function headingGroupForLine(lines, lineIdx, maxLevel, lookup) {
+  const heading = nearestHeading(lines, lineIdx, maxLevel, lookup);
+  if (heading) return { ...heading, text: cleanHeadingText(heading.text) };
+  return { level: 0, line: -1, text: "No heading" };
+}
+function headingGroupKey(group) {
+  return `${group.line}:${group.level}:${group.text}`;
+}
+function cleanSnippet(line) {
+  return line.replace(/!\[\[[^\]\n]*\]\]/g, "").replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "").replace(/(?<!!)\[([^\]\n]*)\]\([^)\n]*\)/g, "$1").replace(/(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g, (_, target, alias) => alias || target).replace(/^[\s>#*+\-]+/, "").replace(/[*_`]/g, "").replace(/\|/g, " ").replace(/[│├└─]+/g, "").replace(/\s+/g, " ").trim();
+}
+function visibleInlineText(text) {
+  return (text || "").replace(/!\[\[[^\]\n]*\]\]/g, "").replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "").replace(/(?<!!)\[([^\]\n]*)\]\([^)\n]*\)/g, "$1").replace(/(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g, (_, target, alias) => alias || target).replace(/<br\s*\/?\s*>/gi, " ").replace(/<[^>]+>/g, "").replace(/[*_`~]/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+}
+
+// src/snippets.js
+function isMostlyCJK(text) {
+  const compact = (text || "").replace(/\s+/g, "");
+  if (!compact) return false;
+  const cjk = (compact.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
+  return cjk >= 2 && cjk / compact.length >= 0.25;
+}
+function snippetWindow(source, hitIdx, hitLen, keepShort = false) {
+  if (keepShort && source.length <= 180) return { s: 0, e: source.length };
+  if (isMostlyCJK(source)) {
+    const s2 = Math.max(0, hitIdx - 14);
+    const e2 = Math.min(source.length, hitIdx + hitLen + 34);
+    return { s: s2, e: e2 };
+  }
+  let s = wordStartBefore(source, hitIdx);
+  if (hitIdx - s === 0) s = extendPrefixWords(source, s, 2);
+  const e = Math.min(source.length, hitIdx + hitLen + 80);
+  return { s, e };
+}
+function appendHighlightedSnippet(container, source, hitIdx, hitLen, keepShort = false) {
+  if (!source) return;
+  if (hitIdx == null || hitIdx < 0 || hitLen <= 0) {
+    container.appendText(source.slice(0, 120));
+    if (source.length > 120) container.appendText("\u2026");
+    return;
+  }
+  const { s, e } = snippetWindow(source, hitIdx, hitLen, keepShort);
+  const win = source.slice(s, e);
+  const ls = hitIdx - s;
+  const le = ls + hitLen;
+  if (s > 0) container.appendText("\u2026");
+  if (ls > 0) container.appendText(win.slice(0, ls));
+  container.createEl("strong", { text: win.slice(ls, le) });
+  if (le < win.length) container.appendText(win.slice(le));
+  if (e < source.length) container.appendText("\u2026");
+}
+function normalizeSnippetPart(text) {
+  return visibleInlineText(text).replace(/\s+/g, " ").trim();
+}
+function ellipsizeMiddle(text, maxLen = 42) {
+  const t = normalizeSnippetPart(text);
+  if (t.length <= maxLen) return t;
+  const head = Math.max(8, Math.floor((maxLen - 1) * 0.62));
+  const tail = Math.max(6, maxLen - 1 - head);
+  return t.slice(0, head).trimEnd() + "\u2026" + t.slice(t.length - tail).trimStart();
+}
+function pushUniquePart(parts, text, opts = {}) {
+  const t = opts.noEllipsis ? normalizeSnippetPart(text) : ellipsizeMiddle(text, opts.maxLen || 42);
+  if (!t) return;
+  const key = t.toLowerCase();
+  if (parts.some((p) => p.text.toLowerCase() === key)) return;
+  parts.push({ text: t, hit: null, role: opts.role || "context" });
+}
+function pushMatchedPart(parts, text, hit, opts = {}) {
+  const full = normalizeSnippetPart(text);
+  if (!full || !hit) return null;
+  const maxLen = opts.maxLen || 96;
+  let display = full;
+  let adjustedHit = { ...hit };
+  if (full.length > maxLen) {
+    const before = isMostlyCJK(full) ? 18 : 28;
+    let s = Math.max(0, hit.index - before);
+    let e = Math.min(full.length, hit.index + hit.length + (maxLen - before));
+    if (!isMostlyCJK(full)) s = wordStartBefore(full, s);
+    display = (s > 0 ? "\u2026" : "") + full.slice(s, e) + (e < full.length ? "\u2026" : "");
+    adjustedHit = {
+      index: hit.index - s + (s > 0 ? 1 : 0),
+      length: hit.length
+    };
+  }
+  const key = display.toLowerCase();
+  const duplicateIdx = parts.findIndex((p) => p.text.toLowerCase() === key);
+  const part = { text: display, hit: adjustedHit, role: opts.role || "match" };
+  if (duplicateIdx >= 0) parts[duplicateIdx] = part;
+  else parts.push(part);
+  return part;
+}
+function buildTableSnippetData(m, lines, matcher, tableLookup) {
+  const loc = locateInTables(lines, m.line, tableLookup);
+  if (!loc || loc.kind !== "body" && loc.kind !== "header") return null;
+  const block = tableBlockForLine(lines, m.line, tableLookup);
+  if (!block) return null;
+  const rowCells = tableDataCells(lines[m.line] || "");
+  const headerCells = tableDataCells(lines[block.headerLine] || "");
+  const info = cellInfoForMatch(lines[m.line] || "", m.ch, matcher);
+  if (!info || info.col < 0) return null;
+  const cell = rowCells[info.col];
+  if (!cell) return null;
+  const displayCell = normalizeSnippetPart(cell.text);
+  if (!displayCell) return null;
+  const sourceOffsetInCell = Math.max(0, m.ch - cell.start);
+  const visibleBefore = normalizeSnippetPart(cell.text.slice(0, sourceOffsetInCell));
+  const visibleK = findAll(visibleBefore, matcher).length;
+  const cellMatches = findAll(displayCell, matcher);
+  const pick = cellMatches[visibleK] || cellMatches[info.kInCell] || cellMatches[0];
+  if (!pick) return null;
+  const parts = [];
+  const header = headerCells[info.col] ? headerCells[info.col].text : "";
+  const rowLabel = rowCells[0] && info.col !== 0 ? rowCells[0].text : "";
+  pushUniquePart(parts, header, { maxLen: 24, role: "header" });
+  pushMatchedPart(parts, displayCell, pick, { maxLen: 88, role: "match" });
+  pushUniquePart(parts, rowLabel, { maxLen: 36, role: "row" });
+  const sep = " \xB7 ";
+  let source = "";
+  let hitIdx = -1;
+  let hitLen = pick.length;
+  for (const part of parts) {
+    if (source) source += sep;
+    const start = source.length;
+    source += part.text;
+    if (part.hit && hitIdx < 0) {
+      hitIdx = start + part.hit.index;
+      hitLen = part.hit.length;
+    }
+  }
+  if (hitIdx < 0) return null;
+  return { source, hitIdx, hitLen, keepShort: true };
+}
+function buildLineSnippetData(m, matcher, domMode) {
+  const source = domMode ? cleanSnippet(m.lineText) : m.lineText;
+  if (!source) return null;
+  let hitIdx;
+  let hitLen;
+  if (domMode) {
+    const spans = hiddenSpansInReading(m.lineText);
+    let kInLine = 0;
+    for (const mt of findAll(m.lineText.slice(0, m.ch), matcher)) {
+      if (!isInsideSpan(mt.index, spans)) kInLine++;
+    }
+    const all = findAll(source, matcher);
+    const pick = all[kInLine] || all[0];
+    if (!pick) return { source, hitIdx: -1, hitLen: 0, keepShort: false };
+    hitIdx = pick.index;
+    hitLen = pick.length;
+  } else {
+    hitIdx = m.ch;
+    hitLen = m.len;
+  }
+  return { source, hitIdx, hitLen, keepShort: false };
+}
+function buildSnippetData(m, lines, matcher, domMode, tableLookup) {
+  return buildTableSnippetData(m, lines, matcher, tableLookup) || buildLineSnippetData(m, matcher, domMode);
+}
+
+// src/dom-resolve.js
+function getRenderRoot(view) {
+  if (!view || !view.containerEl || typeof view.getMode !== "function") return null;
+  const mode = view.getMode();
+  return view.containerEl.querySelector(
+    mode === "preview" ? SELECTORS.readingRoot : SELECTORS.editorRoot
+  );
+}
+function isLivePreviewMode(view) {
+  if (!view || !view.containerEl || typeof view.getMode !== "function") return false;
+  if (view.getMode() !== "source") return false;
+  return !!view.containerEl.querySelector(".markdown-source-view.is-live-preview");
+}
+function getScroller(view) {
+  if (!view || !view.containerEl) return null;
+  return view.containerEl.querySelector(SELECTORS.scroller);
+}
+function getEditorView(editor) {
+  return editor && editor.cm ? editor.cm : null;
+}
+function getElementDocument(el) {
+  return el && el.ownerDocument || document;
+}
+function getElementWindow(el) {
+  const doc = getElementDocument(el);
+  return doc && doc.defaultView || window;
+}
+function getViewDocument(view) {
+  return view && view.containerEl && view.containerEl.ownerDocument || document;
+}
+function getViewWindow(view) {
+  const doc = getViewDocument(view);
+  return doc && doc.defaultView || window;
+}
+function findRenderedMatches(root, matcher, options = {}) {
+  const matches = [];
+  if (!root || !matcher || matcher.invalid) return matches;
+  const scroller = options.scroller;
+  const margin = typeof options.viewportMargin === "number" ? options.viewportMargin : Infinity;
+  let viewTop = -Infinity;
+  let viewBottom = Infinity;
+  if (scroller && margin !== Infinity) {
+    const rect = scroller.getBoundingClientRect();
+    viewTop = rect.top - margin;
+    viewBottom = rect.bottom + margin;
+  }
+  const doc = getElementDocument(root);
+  const win = getElementWindow(root);
+  const filter = win.NodeFilter;
+  const walker = doc.createTreeWalker(root, filter.SHOW_TEXT, {
+    acceptNode(node2) {
+      if (!node2.nodeValue || !node2.nodeValue.trim())
+        return filter.FILTER_REJECT;
+      const tag = node2.parentElement && node2.parentElement.tagName;
+      if (tag === "SCRIPT" || tag === "STYLE") return filter.FILTER_REJECT;
+      return filter.FILTER_ACCEPT;
+    }
+  });
+  let node;
+  while (node = walker.nextNode()) {
+    if (scroller && margin !== Infinity) {
+      const elRect = node.parentElement.getBoundingClientRect();
+      if (elRect.bottom < viewTop || elRect.top > viewBottom) {
+        continue;
+      }
+    }
+    const text = node.nodeValue;
+    for (const mt of findAll(text, matcher)) {
+      const range = doc.createRange();
+      range.setStart(node, mt.index);
+      range.setEnd(node, mt.index + mt.length);
+      matches.push({
+        range,
+        el: node.parentElement,
+        text,
+        index: mt.index,
+        length: mt.length
+      });
+    }
+  }
+  return matches;
+}
+function scrollRangeIntoView(range) {
+  try {
+    if (!range || !range.startContainer) return false;
+    const node = range.startContainer;
+    const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    if (!el || typeof el.scrollIntoView !== "function") return false;
+    const target = el.closest && el.closest(
+      ".cm-line, td, th, tr, p, li, h1, h2, h3, h4, h5, h6, dd, dt, blockquote"
+    ) || el;
+    target.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+    return true;
+  } catch (e) {
+    debugWarn("scrollRangeIntoView", e);
+    return false;
+  }
+}
+function centerEditorOffset(view, editor, off) {
+  try {
+    const pos = editor.offsetToPos(off);
+    editor.setCursor(pos);
+    const cm = getEditorView(editor);
+    const scroller = getScroller(view) || cm && cm.scrollDOM;
+    if (!cm || typeof cm.coordsAtPos !== "function" || !scroller || off == null) return false;
+    requestAnimationFrame(() => {
+      const coords = cm.coordsAtPos(off);
+      if (coords) {
+        const targetY = coords.top + scroller.scrollTop - scroller.getBoundingClientRect().top;
+        scroller.scrollTop = targetY - scroller.clientHeight / 2;
+      }
+    });
+    return true;
+  } catch (e) {
+    debugWarn("centerEditorOffset", e);
+    return false;
+  }
+}
 function findKthOccurrenceRange(el, matcher, k) {
   const doc = getElementDocument(el);
   const win = getElementWindow(el);
   const walker = doc.createTreeWalker(el, win.NodeFilter.SHOW_TEXT);
   let node;
   let count = 0;
-  while ((node = walker.nextNode())) {
+  while (node = walker.nextNode()) {
     for (const mt of findAll(node.nodeValue, matcher)) {
       if (count === k) {
         const r = doc.createRange();
@@ -522,7 +779,6 @@ function findKthOccurrenceRange(el, matcher, k) {
   }
   return null;
 }
-
 function resolveByDomAtPos(cm, off, matcher) {
   try {
     if (!cm || typeof cm.domAtPos !== "function") return null;
@@ -549,12 +805,10 @@ function resolveByDomAtPos(cm, off, matcher) {
     return null;
   }
 }
-
 function closestElementFromNode(node) {
   if (!node) return null;
   return node.nodeType === 1 ? node : node.parentElement;
 }
-
 function tableFromDomAtPos(cm, off) {
   try {
     if (!cm || typeof cm.domAtPos !== "function") return null;
@@ -566,7 +820,6 @@ function tableFromDomAtPos(cm, off) {
     return null;
   }
 }
-
 function tableFromPoint(cm, off) {
   try {
     if (!cm || typeof cm.coordsAtPos !== "function") return null;
@@ -587,17 +840,14 @@ function tableFromPoint(cm, off) {
     return null;
   }
 }
-
 function resolveTableByPoint(cm, off, lines, m, matcher) {
   try {
     const tableEl = tableFromDomAtPos(cm, off) || tableFromPoint(cm, off);
     if (!tableEl) return null;
-
     const info = cellInfoForMatch(lines[m.line], m.ch, matcher);
     if (!info || info.col < 0) return null;
     const loc = locateInTables(lines, m.line);
     if (!loc || loc.kind === "delim") return null;
-
     let rowEl = null;
     if (loc.kind === "header") {
       rowEl = tableEl.querySelector("thead tr") || tableEl.querySelector("tr");
@@ -605,7 +855,6 @@ function resolveTableByPoint(cm, off, lines, m, matcher) {
       rowEl = tableEl.querySelectorAll("tbody tr")[loc.bodyRowIdx];
     }
     if (!rowEl) return null;
-
     const cellEl = rowEl.querySelectorAll("th, td")[info.col];
     if (!cellEl) return null;
     return findKthOccurrenceRange(cellEl, matcher, info.kInCell);
@@ -614,430 +863,10 @@ function resolveTableByPoint(cm, off, lines, m, matcher) {
     return null;
   }
 }
-
-/**
- * True if `ch` should be treated as a "word" boundary for snippet purposes:
- * whitespace, table pipes, CJK punctuation, full-width forms, or any CJK char
- * (each Chinese character is its own word).
- */
-function isWordSep(ch) {
-  if (!ch) return true;
-  if (/\s/.test(ch)) return true;
-  if (ch === "|" || ch === "│") return true;
-  const code = ch.charCodeAt(0);
-  if (code >= 0x3000 && code <= 0x303f) return true; // CJK symbols & punctuation
-  if (code >= 0xff00 && code <= 0xffef) return true; // full-width forms
-  if (code >= 0x4e00 && code <= 0x9fff) return true; // CJK unified ideographs
-  return false;
-}
-
-/** Start of the "word" containing position `idx` in `text`. */
-function wordStartBefore(text, idx) {
-  let i = idx;
-  while (i > 0 && !isWordSep(text.charAt(i - 1))) i--;
-  return i;
-}
-
-/**
- * Extend `start` backward by up to `n` more whole words so the snippet has real
- * context: skip a run of separators, then walk through one more word. Stops at
- * hard boundaries (CJK char, table pipe, line start).
- */
-function extendPrefixWords(text, start, n) {
-  let cursor = start;
-  while (n > 0 && cursor > 0) {
-    let p = cursor;
-    while (p > 0 && isWordSep(text.charAt(p - 1)) && text.charAt(p - 1) !== "|") p--;
-    if (p === cursor) break; // no separators to skip
-    if (p > 0 && text.charAt(p - 1) === "|") break; // don't cross table cells
-    const end = p;
-    while (p > 0 && !isWordSep(text.charAt(p - 1))) p--;
-    if (p === end) break;
-    cursor = p;
-    n--;
-  }
-  return cursor;
-}
-
-/** Source-level ranges occupied by Markdown image syntax on a line. */
-function imageSpansIn(line) {
-  const spans = [];
-  let re = /!\[\[[^\]\n]*\]\]/g;
-  let m;
-  while ((m = re.exec(line)) !== null)
-    spans.push([m.index, m.index + m[0].length]);
-  re = /!\[[^\]\n]*\]\([^)\n]*\)/g;
-  while ((m = re.exec(line)) !== null)
-    spans.push([m.index, m.index + m[0].length]);
-  return spans;
-}
-
-/**
- * Source-level ranges that are not visible in Reading mode. Examples:
- *   [visible text](hidden-url)       -> URL and brackets are hidden
- *   [[hidden-target|visible alias]]  -> target / pipe / brackets are hidden
- *   ![[image.png]] and ![alt](img)   -> whole image syntax is hidden as text
- */
-function hiddenSpansInReading(line) {
-  const spans = [...imageSpansIn(line)];
-  let m;
-
-  // Standard Markdown links. Keep only the label between [ and ] visible.
-  const mdLink = /(?<!!)\[([^\]\n]*)\]\(([^)\n]*)\)/g;
-  while ((m = mdLink.exec(line)) !== null) {
-    const textStart = m.index + 1;
-    const textEnd = textStart + m[1].length;
-    spans.push([m.index, textStart]);
-    spans.push([textEnd, m.index + m[0].length]);
-  }
-
-  // Obsidian wikilinks. [[Page]] shows Page; [[Page|Alias]] shows Alias.
-  const wiki = /(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g;
-  while ((m = wiki.exec(line)) !== null) {
-    if (m[2] != null) {
-      const aliasStart = m.index + m[0].indexOf("|") + 1;
-      const aliasEnd = m.index + m[0].length - 2;
-      spans.push([m.index, aliasStart]);
-      spans.push([aliasEnd, m.index + m[0].length]);
-    } else {
-      spans.push([m.index, m.index + 2]);
-      spans.push([m.index + m[0].length - 2, m.index + m[0].length]);
-    }
-  }
-
-  return spans.sort((a, b) => a[0] - b[0]);
-}
-
-function isInsideSpan(ch, spans) {
-  for (const [a, b] of spans) if (ch >= a && ch < b) return true;
-  return false;
-}
-
-/** For a table row, return the previous cell's text as a semantic anchor. */
-function previousCellOf(line, ch) {
-  if (!isTableRow(line)) return null;
-  const cells = parseCells(line);
-  for (let c = 0; c < cells.length; c++) {
-    const cell = cells[c];
-    if (ch >= cell.start && ch <= cell.start + cell.text.length) {
-      for (let p = c - 1; p >= 0; p--) {
-        const t = cells[p].text.trim();
-        if (t) return t.replace(/[*_`]/g, "").replace(/\s+/g, " ").slice(0, 24);
-      }
-      return null;
-    }
-  }
-  return null;
-}
-
-function parseHeading(line, lineIdx) {
-  const m = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line || "");
-  if (!m) return null;
-  return { level: m[1].length, text: m[2], line: lineIdx };
-}
-
-/** Walk up source lines to find the nearest Markdown heading above `lineIdx`. */
-function nearestHeading(lines, lineIdx, maxLevel = 6) {
-  for (let i = lineIdx; i >= 0; i--) {
-    const heading = parseHeading(lines[i], i);
-    if (heading && heading.level <= maxLevel) return heading;
-  }
-  return null;
-}
-
-function cleanHeadingText(text) {
-  return (text || "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
-}
-
-function headingGroupForLine(lines, lineIdx, maxLevel) {
-  const heading = nearestHeading(lines, lineIdx, maxLevel);
-  if (heading) return { ...heading, text: cleanHeadingText(heading.text) };
-  return { level: 0, line: -1, text: "No heading" };
-}
-
-function headingGroupKey(group) {
-  return `${group.line}:${group.level}:${group.text}`;
-}
-
-/** Strip common Markdown noise from a source line for clean list snippets. */
-function cleanSnippet(line) {
-  return line
-    .replace(/!\[\[[^\]\n]*\]\]/g, "") // Obsidian image embeds
-    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "") // standard images
-    .replace(/(?<!!)\[([^\]\n]*)\]\([^)\n]*\)/g, "$1") // standard links
-    .replace(/(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g, (_, target, alias) => alias || target)
-    .replace(/^[\s>#*+\-]+/, "")
-    .replace(/[*_`]/g, "")
-    .replace(/\|/g, " ")
-    .replace(/[│├└─]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-/** Convert a small Markdown inline fragment to the text users actually read. */
-function visibleInlineText(text) {
-  return (text || "")
-    .replace(/!\[\[[^\]\n]*\]\]/g, "") // image embed: not readable text
-    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, "") // standard image
-    .replace(/(?<!!)\[([^\]\n]*)\]\([^)\n]*\)/g, "$1") // [label](url) -> label
-    .replace(/(?<!!)\[\[([^|\]\n]*)(?:\|([^\]\n]*))?\]\]/g, (_, target, alias) => alias || target)
-    .replace(/<br\s*\/?\s*>/gi, " ")
-    .replace(/<[^>]+>/g, "")
-    .replace(/[*_`~]/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function tableDataCells(line) {
-  const raw = parseCells(line);
-  const out = [];
-  let dataCol = -1;
-  for (let i = 0; i < raw.length; i++) {
-    const cell = raw[i];
-    const isEdgeEmpty =
-      (i === 0 || i === raw.length - 1) && cell.text.trim() === "";
-    if (isEdgeEmpty) continue;
-    dataCol++;
-    out.push({ ...cell, dataCol });
-  }
-  return out;
-}
-
-function tableBlockForLine(lines, lineIdx) {
-  let i = 0;
-  while (i < lines.length) {
-    if (!isTableRow(lines[i])) {
-      i++;
-      continue;
-    }
-
-    const blockStart = i;
-    let j = i;
-    while (j < lines.length && isTableRow(lines[j])) j++;
-
-    let delimLine = -1;
-    for (let k = blockStart; k < j; k++) {
-      if (isDelimiterRow(lines[k])) {
-        delimLine = k;
-        break;
-      }
-    }
-
-    if (delimLine !== -1 && lineIdx >= blockStart && lineIdx < j) {
-      return { blockStart, blockEnd: j, headerLine: blockStart, delimLine };
-    }
-    i = j;
-  }
-  return null;
-}
-
-function isMostlyCJK(text) {
-  const compact = (text || "").replace(/\s+/g, "");
-  if (!compact) return false;
-  const cjk = (compact.match(/[\u3400-\u9fff\uf900-\ufaff]/g) || []).length;
-  return cjk >= 2 && cjk / compact.length >= 0.25;
-}
-
-function snippetWindow(source, hitIdx, hitLen, keepShort = false) {
-  if (keepShort && source.length <= 180) return { s: 0, e: source.length };
-
-  if (isMostlyCJK(source)) {
-    const s = Math.max(0, hitIdx - 14);
-    const e = Math.min(source.length, hitIdx + hitLen + 34);
-    return { s, e };
-  }
-
-  let s = wordStartBefore(source, hitIdx);
-  if (hitIdx - s === 0) s = extendPrefixWords(source, s, 2);
-  const e = Math.min(source.length, hitIdx + hitLen + 80);
-  return { s, e };
-}
-
-function appendHighlightedSnippet(container, source, hitIdx, hitLen, keepShort = false) {
-  if (!source) return;
-  if (hitIdx == null || hitIdx < 0 || hitLen <= 0) {
-    container.appendText(source.slice(0, 120));
-    if (source.length > 120) container.appendText("…");
-    return;
-  }
-
-  const { s, e } = snippetWindow(source, hitIdx, hitLen, keepShort);
-  const win = source.slice(s, e);
-  const ls = hitIdx - s;
-  const le = ls + hitLen;
-
-  if (s > 0) container.appendText("…");
-  if (ls > 0) container.appendText(win.slice(0, ls));
-  container.createEl("strong", { text: win.slice(ls, le) });
-  if (le < win.length) container.appendText(win.slice(le));
-  if (e < source.length) container.appendText("…");
-}
-
-function normalizeSnippetPart(text) {
-  return visibleInlineText(text).replace(/\s+/g, " ").trim();
-}
-
-function ellipsizeMiddle(text, maxLen = 42) {
-  const t = normalizeSnippetPart(text);
-  if (t.length <= maxLen) return t;
-  const head = Math.max(8, Math.floor((maxLen - 1) * 0.62));
-  const tail = Math.max(6, maxLen - 1 - head);
-  return t.slice(0, head).trimEnd() + "…" + t.slice(t.length - tail).trimStart();
-}
-
-function pushUniquePart(parts, text, opts = {}) {
-  const t = opts.noEllipsis
-    ? normalizeSnippetPart(text)
-    : ellipsizeMiddle(text, opts.maxLen || 42);
-  if (!t) return;
-  const key = t.toLowerCase();
-  if (parts.some((p) => p.text.toLowerCase() === key)) return;
-  parts.push({ text: t, hit: null, role: opts.role || "context" });
-}
-
-function pushMatchedPart(parts, text, hit, opts = {}) {
-  const full = normalizeSnippetPart(text);
-  if (!full || !hit) return null;
-
-  // Keep the matched cell near the beginning of the visible snippet. If the cell
-  // is long, crop around the exact hit, but keep hit.index aligned to the cropped
-  // text so the result list highlights the same occurrence the user selected.
-  const maxLen = opts.maxLen || 96;
-  let display = full;
-  let adjustedHit = { ...hit };
-  if (full.length > maxLen) {
-    const before = isMostlyCJK(full) ? 18 : 28;
-    let s = Math.max(0, hit.index - before);
-    let e = Math.min(full.length, hit.index + hit.length + (maxLen - before));
-
-    // Prefer not to start in the middle of an English word.
-    if (!isMostlyCJK(full)) s = wordStartBefore(full, s);
-    display = (s > 0 ? "…" : "") + full.slice(s, e) + (e < full.length ? "…" : "");
-    adjustedHit = {
-      index: hit.index - s + (s > 0 ? 1 : 0),
-      length: hit.length,
-    };
-  }
-
-  const key = display.toLowerCase();
-  const duplicateIdx = parts.findIndex((p) => p.text.toLowerCase() === key);
-  const part = { text: display, hit: adjustedHit, role: opts.role || "match" };
-  if (duplicateIdx >= 0) parts[duplicateIdx] = part;
-  else parts.push(part);
-  return part;
-}
-
-function buildTableSnippetData(m, lines, matcher) {
-  const loc = locateInTables(lines, m.line);
-  if (!loc || (loc.kind !== "body" && loc.kind !== "header")) return null;
-
-  const block = tableBlockForLine(lines, m.line);
-  if (!block) return null;
-
-  const rowCells = tableDataCells(lines[m.line] || "");
-  const headerCells = tableDataCells(lines[block.headerLine] || "");
-  const info = cellInfoForMatch(lines[m.line] || "", m.ch, matcher);
-  if (!info || info.col < 0) return null;
-
-  const cell = rowCells[info.col];
-  if (!cell) return null;
-
-  const displayCell = normalizeSnippetPart(cell.text);
-  if (!displayCell) return null;
-
-  // Estimate the occurrence index inside the visible cell. This is usually more
-  // stable than using the raw Markdown cell because links/emphasis may disappear.
-  const sourceOffsetInCell = Math.max(0, m.ch - cell.start);
-  const visibleBefore = normalizeSnippetPart(cell.text.slice(0, sourceOffsetInCell));
-  const visibleK = findAll(visibleBefore, matcher).length;
-  const cellMatches = findAll(displayCell, matcher);
-  const pick = cellMatches[visibleK] || cellMatches[info.kInCell] || cellMatches[0];
-  if (!pick) return null;
-
-  const parts = [];
-  const header = headerCells[info.col] ? headerCells[info.col].text : "";
-  const rowLabel = rowCells[0] && info.col !== 0 ? rowCells[0].text : "";
-
-  // Cell-level table snippets: put the column + matched cell first so the exact
-  // hit is always visible in the one-line result list. The row label is still
-  // included as trailing context, but shortened so it cannot hide the hit.
-  // Example: 控制 · 自主 (Voluntary) · ① 口腔期 (Voluntary / Buccal…)
-  pushUniquePart(parts, header, { maxLen: 24, role: "header" });
-  pushMatchedPart(parts, displayCell, pick, { maxLen: 88, role: "match" });
-  pushUniquePart(parts, rowLabel, { maxLen: 36, role: "row" });
-
-  const sep = " · ";
-  let source = "";
-  let hitIdx = -1;
-  let hitLen = pick.length;
-  for (const part of parts) {
-    if (source) source += sep;
-    const start = source.length;
-    source += part.text;
-    if (part.hit && hitIdx < 0) {
-      hitIdx = start + part.hit.index;
-      hitLen = part.hit.length;
-    }
-  }
-
-  if (hitIdx < 0) return null;
-  // The hit is now near the beginning by construction, so keeping the short
-  // table snippet is safe and avoids jumping back to the long row label.
-  return { source, hitIdx, hitLen, keepShort: true };
-}
-
-function buildLineSnippetData(m, matcher, domMode) {
-  const source = domMode ? cleanSnippet(m.lineText) : m.lineText;
-  if (!source) return null;
-
-  let hitIdx;
-  let hitLen;
-  if (domMode) {
-    // Count matches before this one within the same source line, skipping hidden
-    // Markdown spans, then select the same occurrence in the visible text.
-    const spans = hiddenSpansInReading(m.lineText);
-    let kInLine = 0;
-    for (const mt of findAll(m.lineText.slice(0, m.ch), matcher)) {
-      if (!isInsideSpan(mt.index, spans)) kInLine++;
-    }
-    const all = findAll(source, matcher);
-    const pick = all[kInLine] || all[0];
-    if (!pick) return { source, hitIdx: -1, hitLen: 0, keepShort: false };
-    hitIdx = pick.index;
-    hitLen = pick.length;
-  } else {
-    hitIdx = m.ch;
-    hitLen = m.len;
-  }
-
-  return { source, hitIdx, hitLen, keepShort: false };
-}
-
-function buildSnippetData(m, lines, matcher, domMode) {
-  return (
-    buildTableSnippetData(m, lines, matcher) ||
-    buildLineSnippetData(m, matcher, domMode)
-  );
-}
-
-/**
- * Reading mode: map a source match to its exact rendered range by content.
- * Find the rendered element (table row / heading / paragraph / list item) whose
- * full text equals the source line, then take the k-th query occurrence in it
- * (k = occurrences before the match within the same source line). Robust to
- * virtualization and duplicate cells (ordering is within one line).
- */
 function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
   try {
     if (!root) return null;
     const line = lines[m.line] || "";
-    // Count only matches that are visible in Reading mode, so the k-th match in
-    // the source line aligns with the k-th visible match in the DOM.
     const spans = hiddenSpansInReading(line);
     let kInLine = 0;
     for (const mt of findAll(line.slice(0, m.ch), matcher)) {
@@ -1048,7 +877,6 @@ function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
     const els = root.querySelectorAll(
       "tr, p, li, h1, h2, h3, h4, h5, h6, dd, dt, td, th, blockquote"
     );
-
     const candidates = [];
     for (const el of els) {
       const got = (el.textContent || "").replace(/\s+/g, "").toLowerCase();
@@ -1058,10 +886,6 @@ function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
       }
     }
     if (!candidates.length) return null;
-
-    // If the same row/paragraph text appears multiple times, choose the rendered
-    // occurrence nearest the current scroll target instead of blindly taking the
-    // first duplicate in the DOM.
     const rect = scroller ? scroller.getBoundingClientRect() : { top: 0 };
     const targetY = rect.top + 80;
     let best = candidates[0];
@@ -1081,9 +905,428 @@ function resolveReadingCurrentRange(root, lines, m, matcher, scroller) {
   }
 }
 
-/* ----------------------------- find bar ----------------------------- */
+// src/highlighter.js
+function getHighlightSupport(view) {
+  const win = getViewWindow(view);
+  const css = win && win.CSS;
+  if (!css || !css.highlights || !win.Highlight) return null;
+  return {
+    Highlight: win.Highlight,
+    registry: css.highlights
+  };
+}
+function clearHighlights(view, previousRegistry = null) {
+  const registries = [previousRegistry];
+  const support = getHighlightSupport(view);
+  if (support) registries.push(support.registry);
+  const seen = /* @__PURE__ */ new Set();
+  for (const registry of registries) {
+    if (!registry || seen.has(registry)) continue;
+    seen.add(registry);
+    registry.delete(HL_ALL);
+    registry.delete(HL_CURRENT);
+  }
+}
+function applyHighlights(view, previousRegistry, dom, currentRange) {
+  const support = getHighlightSupport(view);
+  if (!support) return null;
+  if (previousRegistry && previousRegistry !== support.registry) {
+    previousRegistry.delete(HL_ALL);
+    previousRegistry.delete(HL_CURRENT);
+  }
+  support.registry.set(HL_ALL, new support.Highlight(...dom.map((d) => d.range)));
+  if (currentRange) {
+    const hl = new support.Highlight(currentRange);
+    hl.priority = 1;
+    support.registry.set(HL_CURRENT, hl);
+  } else {
+    support.registry.delete(HL_CURRENT);
+  }
+  return support.registry;
+}
+function rangeCenterY(range) {
+  try {
+    if (!range) return null;
+    const rect = range.getBoundingClientRect();
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return null;
+    return (rect.top + rect.bottom) / 2;
+  } catch (e) {
+    debugWarn("rangeCenterY", e);
+    return null;
+  }
+}
+function viewportCenterY(scroller) {
+  try {
+    if (!scroller || typeof scroller.getBoundingClientRect !== "function") return null;
+    const rect = scroller.getBoundingClientRect();
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return null;
+    return (rect.top + rect.bottom) / 2;
+  } catch (e) {
+    debugWarn("viewportCenterY", e);
+    return null;
+  }
+}
+function limitDomHighlightsAroundCurrent(dom, currentRange, max, scroller) {
+  var _a;
+  if (!Array.isArray(dom) || !dom.length) return [];
+  const n = Number(max);
+  if (!Number.isFinite(n) || n <= 0 || dom.length <= n) return dom;
+  const centerY = (_a = rangeCenterY(currentRange)) != null ? _a : viewportCenterY(scroller);
+  if (centerY == null) return dom.slice(0, n);
+  return dom.map((d, i) => {
+    const y = rangeCenterY(d.range);
+    return {
+      item: d,
+      index: i,
+      dist: y == null ? Infinity : Math.abs(y - centerY)
+    };
+  }).sort((a, b) => a.dist - b.dist || a.index - b.index).slice(0, n).sort((a, b) => a.index - b.index).map((x) => x.item);
+}
 
-class FindBar {
+// src/results-list.js
+var VirtualResultList = class {
+  constructor({ container, getCurrent, getGroupInfo, onAfterRender, renderRow }) {
+    this.el = container;
+    this.getCurrent = getCurrent;
+    this.getGroupInfo = getGroupInfo;
+    this.onAfterRender = onAfterRender;
+    this.renderRow = renderRow;
+    this.itemCount = 0;
+    this.renderLimit = RESULT_RENDER_BATCH;
+    this.renderedCount = 0;
+    this.renderedGroupKey = null;
+    this.activeRow = null;
+    this.observer = null;
+    this.sentinelEl = null;
+    this.spacerEl = null;
+    this.moreBtnEl = null;
+    this.displayLimit = 0;
+    this.averageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
+    this.renderToken = 0;
+    this.scrollFrame = null;
+    this.scrollWindow = null;
+    this.prefetchId = null;
+    this.prefetchKind = null;
+    this.prefetchWindow = null;
+    this.catchupFrame = null;
+    this.catchupWindow = null;
+    this.onScroll = null;
+    this.setupObserver();
+  }
+  destroy() {
+    this.disconnectObserver();
+    this.cancelPrefetch();
+    this.cancelCatchup();
+    this.cancelScrollCheck();
+    this.clearTail();
+    if (this.el) this.el.empty();
+    this.el = null;
+    this.itemCount = 0;
+    this.activeRow = null;
+  }
+  clear() {
+    this.renderToken += 1;
+    this.cancelPrefetch();
+    this.cancelCatchup();
+    this.cancelScrollCheck();
+    this.clearTail();
+    if (this.el) this.el.empty();
+    this.renderLimit = RESULT_RENDER_BATCH;
+    this.renderedCount = 0;
+    this.renderedGroupKey = null;
+    this.activeRow = null;
+    this.displayLimit = 0;
+    this.averageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
+  }
+  setItems(itemCount, activeIndex) {
+    const el = this.el;
+    if (!el) return;
+    this.clear();
+    this.itemCount = Math.max(0, Number(itemCount) || 0);
+    if (!this.itemCount) return;
+    el.scrollTop = 0;
+    this.displayLimit = Math.min(this.itemCount, RESULT_DISPLAY_CAP);
+    this.ensureCapCovers(activeIndex);
+    this.renderLimit = Math.min(
+      this.displayLimit || this.itemCount,
+      Math.max(RESULT_RENDER_BATCH, activeIndex + 1)
+    );
+    this.renderChunk(this.renderLimit);
+    this.setActive(activeIndex, { block: "center" });
+    this.schedulePrefetch();
+  }
+  ensureCapCovers(index) {
+    if (index == null || index < 0) return;
+    if (index < this.displayLimit) return;
+    const steps = Math.ceil((index + 1) / RESULT_DISPLAY_CAP);
+    this.displayLimit = Math.min(this.itemCount, steps * RESULT_DISPLAY_CAP);
+  }
+  renderChunk(targetCount) {
+    const el = this.el;
+    if (!el || !this.itemCount) return false;
+    const groupInfo = this.getGroupInfo ? this.getGroupInfo() : null;
+    const start = this.renderedCount || 0;
+    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
+    const end = Math.min(limit, targetCount);
+    if (end <= start) return false;
+    const keepScrollTop = el.scrollTop;
+    this.clearTail();
+    const state = { lastGroupKey: this.renderedGroupKey };
+    const activeIndex = this.current();
+    for (let i = start; i < end; i++) {
+      const row = this.renderRow ? this.renderRow(i, groupInfo, state) : null;
+      if (row && i === activeIndex) {
+        row.addClass("is-active");
+        this.activeRow = row;
+      }
+    }
+    this.renderedCount = end;
+    this.renderedGroupKey = state.lastGroupKey;
+    this.updateAverageHeight(el.scrollHeight, this.renderedCount);
+    this.updateTail();
+    el.scrollTop = keepScrollTop;
+    return true;
+  }
+  ensureRendered(index) {
+    if (index < 0 || index >= this.itemCount) return false;
+    if (index < (this.renderedCount || 0)) return true;
+    this.ensureCapCovers(index);
+    this.renderLimit = Math.min(
+      this.displayLimit || this.itemCount,
+      Math.max(index + 1, (this.renderedCount || 0) + RESULT_RENDER_BATCH)
+    );
+    const changed = this.renderChunk(this.renderLimit);
+    if (changed && this.onAfterRender) this.onAfterRender();
+    return index < (this.renderedCount || 0);
+  }
+  setupObserver() {
+    const el = this.el;
+    if (!el) return;
+    this.disconnectObserver();
+    this.onScroll = () => this.scheduleScrollCheck();
+    el.addEventListener("scroll", this.onScroll, { passive: true });
+    const win = getElementWindow(el);
+    if (win && typeof win.IntersectionObserver === "function") {
+      this.observer = new win.IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            this.maybeRenderMore({ force: true });
+          }
+        },
+        {
+          root: el,
+          rootMargin: `0px 0px ${RESULT_RENDER_AHEAD_PX}px 0px`,
+          threshold: 0
+        }
+      );
+    }
+  }
+  disconnectObserver() {
+    if (this.observer) this.observer.disconnect();
+    this.observer = null;
+    this.cancelScrollCheck();
+    if (this.el && this.onScroll) {
+      this.el.removeEventListener("scroll", this.onScroll);
+    }
+    this.onScroll = null;
+    this.sentinelEl = null;
+    this.spacerEl = null;
+    this.moreBtnEl = null;
+  }
+  scheduleScrollCheck() {
+    const el = this.el;
+    if (!el || this.scrollFrame != null) return;
+    const win = getElementWindow(el);
+    this.scrollWindow = win;
+    this.scrollFrame = win.requestAnimationFrame(() => {
+      this.scrollFrame = null;
+      this.scrollWindow = null;
+      this.maybeRenderMore();
+    });
+  }
+  cancelScrollCheck() {
+    if (this.scrollFrame == null) return;
+    const win = this.scrollWindow || (this.el ? getElementWindow(this.el) : null);
+    if (win && typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(this.scrollFrame);
+    }
+    this.scrollFrame = null;
+    this.scrollWindow = null;
+  }
+  clearTail() {
+    if (this.sentinelEl) {
+      if (this.observer) this.observer.unobserve(this.sentinelEl);
+      this.sentinelEl.remove();
+      this.sentinelEl = null;
+    }
+    if (this.spacerEl) {
+      this.spacerEl.remove();
+      this.spacerEl = null;
+    }
+    if (this.moreBtnEl) {
+      this.moreBtnEl.remove();
+      this.moreBtnEl = null;
+    }
+  }
+  updateAverageHeight(totalRowsHeight, renderedCount) {
+    if (renderedCount <= 0 || totalRowsHeight <= 0) return;
+    const sample = totalRowsHeight / renderedCount;
+    if (!Number.isFinite(sample) || sample < 12) return;
+    this.averageRowHeight = sample;
+  }
+  updateTail() {
+    const el = this.el;
+    if (!el || !this.itemCount) return;
+    this.clearTail();
+    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
+    const rendered = this.renderedCount || 0;
+    if (rendered < limit) {
+      this.sentinelEl = el.createDiv({ cls: "lf-sentinel" });
+      if (this.observer) this.observer.observe(this.sentinelEl);
+      this.spacerEl = el.createDiv({ cls: "lf-spacer" });
+      this.spacerEl.style.height = `${Math.max(
+        0,
+        Math.round(
+          (limit - rendered) * (this.averageRowHeight || DEFAULT_RESULT_ROW_HEIGHT)
+        )
+      )}px`;
+    }
+    if (limit < this.itemCount) {
+      this.moreBtnEl = el.createEl("button", { cls: "lf-btn lf-more-btn" });
+      this.moreBtnEl.setText(`Show more (${this.itemCount - limit} hidden)`);
+      this.moreBtnEl.onclick = () => this.expandCap();
+    }
+  }
+  expandCap() {
+    if (!this.el || this.displayLimit >= this.itemCount) return;
+    this.displayLimit = Math.min(
+      this.itemCount,
+      this.displayLimit + RESULT_DISPLAY_CAP
+    );
+    this.renderLimit = Math.max(
+      this.renderLimit || RESULT_RENDER_BATCH,
+      (this.renderedCount || 0) + RESULT_RENDER_BATCH
+    );
+    if (!this.renderChunk(this.renderLimit)) this.updateTail();
+    if (this.onAfterRender) this.onAfterRender();
+    this.schedulePrefetch();
+  }
+  isNearBottom() {
+    const el = this.el;
+    if (!el) return false;
+    const tailTop = this.sentinelEl ? this.sentinelEl.offsetTop : el.scrollHeight;
+    return el.scrollTop + el.clientHeight >= tailTop - RESULT_RENDER_AHEAD_PX;
+  }
+  maybeRenderMore(options = {}) {
+    const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
+    if (!this.el || !this.itemCount || (this.renderedCount || 0) >= limit) return;
+    if (!options.force && !this.isNearBottom()) return;
+    this.renderLimit = Math.min(
+      limit,
+      Math.max(
+        this.renderLimit || RESULT_RENDER_BATCH,
+        (this.renderedCount || 0) + RESULT_RENDER_BATCH
+      )
+    );
+    if (this.renderChunk(this.renderLimit)) {
+      if (this.onAfterRender) this.onAfterRender();
+      this.schedulePrefetch();
+      if (this.isNearBottom()) this.scheduleCatchup();
+    }
+  }
+  schedulePrefetch() {
+    const el = this.el;
+    if (!el || this.prefetchId != null || !this.itemCount) return;
+    const cap = Math.min(this.displayLimit || this.itemCount, this.itemCount);
+    if ((this.renderedCount || 0) >= cap) return;
+    const win = getElementWindow(el);
+    const token = this.renderToken;
+    const run = () => {
+      this.prefetchId = null;
+      this.prefetchKind = null;
+      this.prefetchWindow = null;
+      if (token !== this.renderToken || !this.el || !this.itemCount) return;
+      const limit = Math.min(this.displayLimit || this.itemCount, this.itemCount);
+      if ((this.renderedCount || 0) >= limit) return;
+      const scrollTop = this.el.scrollTop;
+      const target = Math.min(
+        limit,
+        (this.renderedCount || 0) + RESULT_IDLE_PREFETCH_BATCH
+      );
+      if (this.renderChunk(target)) {
+        this.el.scrollTop = scrollTop;
+        if (this.onAfterRender) this.onAfterRender();
+      }
+      this.schedulePrefetch();
+    };
+    if (win && typeof win.requestIdleCallback === "function") {
+      this.prefetchKind = "idle";
+      this.prefetchId = win.requestIdleCallback(run, { timeout: 350 });
+    } else {
+      this.prefetchKind = "timeout";
+      this.prefetchId = win.setTimeout(run, 80);
+    }
+    this.prefetchWindow = win;
+  }
+  cancelPrefetch() {
+    if (this.prefetchId == null) return;
+    const win = this.prefetchWindow || (this.el ? getElementWindow(this.el) : null);
+    if (this.prefetchKind === "idle" && win && typeof win.cancelIdleCallback === "function") {
+      win.cancelIdleCallback(this.prefetchId);
+    } else if (win && typeof win.clearTimeout === "function") {
+      win.clearTimeout(this.prefetchId);
+    }
+    this.prefetchId = null;
+    this.prefetchKind = null;
+    this.prefetchWindow = null;
+  }
+  scheduleCatchup() {
+    const el = this.el;
+    if (!el || this.catchupFrame != null) return;
+    const win = getElementWindow(el);
+    this.catchupWindow = win;
+    this.catchupFrame = win.requestAnimationFrame(() => {
+      this.catchupFrame = null;
+      this.catchupWindow = null;
+      this.maybeRenderMore();
+    });
+  }
+  cancelCatchup() {
+    if (this.catchupFrame == null) return;
+    const win = this.catchupWindow || (this.el ? getElementWindow(this.el) : null);
+    if (win && typeof win.cancelAnimationFrame === "function") {
+      win.cancelAnimationFrame(this.catchupFrame);
+    }
+    this.catchupFrame = null;
+    this.catchupWindow = null;
+  }
+  current() {
+    const current = this.getCurrent ? this.getCurrent() : -1;
+    return Number.isFinite(current) ? current : -1;
+  }
+  setActive(index, options = {}) {
+    if (!this.el) return;
+    const shouldScroll = options.scroll !== false;
+    this.ensureRendered(index);
+    const previous = this.activeRow && this.activeRow.isConnected ? this.activeRow : null;
+    const row = index >= 0 ? this.el.querySelector(`.lf-row[data-match-index="${index}"]`) : null;
+    if (previous && previous !== row) previous.classList.remove("is-active");
+    if (row) {
+      row.classList.add("is-active");
+      if (shouldScroll) {
+        row.scrollIntoView({
+          block: options.block || "nearest",
+          inline: "nearest"
+        });
+      }
+    }
+    this.activeRow = row || null;
+    if (this.onAfterRender) this.onAfterRender();
+  }
+};
+
+// src/find-bar.js
+var FindBar = class {
   constructor(plugin, view) {
     this.plugin = plugin;
     this.view = view;
@@ -1091,10 +1334,7 @@ class FindBar {
     this.current = -1;
     this.query = "";
     this.matcher = null;
-    const options =
-      plugin && typeof plugin.getFindOptions === "function"
-        ? plugin.getFindOptions()
-        : DEFAULT_FIND_OPTIONS;
+    const options = plugin && typeof plugin.getFindOptions === "function" ? plugin.getFindOptions() : DEFAULT_FIND_OPTIONS;
     this.caseSensitive = options.caseSensitive;
     this.useRegex = options.useRegex;
     this.wholeWord = options.wholeWord;
@@ -1102,82 +1342,56 @@ class FindBar {
     this.headingGroupLevel = options.headingGroupLevel;
     this.showResultHeadings = options.showResultHeadings;
     this.jumpNearest = options.jumpNearest;
-    this.domMode = false; // reading mode: jump via applyScroll, highlight on DOM
-    this.renderedTextMode = false; // reading/live preview hide some Markdown syntax
-    this.currentDomRange = null; // anchored current range in reading mode
+    this.domMode = false;
+    this.renderedTextMode = false;
+    this.currentDomRange = null;
     this.highlightToken = 0;
     this.highlightRegistry = null;
-    this.resultRenderLimit = RESULT_RENDER_BATCH;
-    this.renderedResultCount = 0;
-    this.renderedGroupKey = null;
-    this.activeResultRow = null;
-    this.resultObserver = null;
-    this.resultSentinelEl = null;
-    this.resultSpacerEl = null;
-    this.resultAverageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
-    this.resultRenderToken = 0;
-    this.resultPrefetchId = null;
-    this.resultPrefetchKind = null;
-    this.resultPrefetchWindow = null;
-    this.resultCatchupFrame = null;
-    this.resultCatchupWindow = null;
+    this.resultList = null;
     this.barEl = null;
     this.resultsEl = null;
   }
-
   get editor() {
     return this.view && this.view.editor;
   }
-
   isOpen() {
     return !!this.barEl;
   }
-
   viewModeKey() {
     return `${this.view.getMode()}:${isLivePreviewMode(this.view) ? "live" : "plain"}`;
   }
-
   nextHighlightToken() {
     this.highlightToken += 1;
     return this.highlightToken;
   }
-
   updateScroller() {
     if (this.scroller && this.onScroll) {
       this.scroller.removeEventListener("scroll", this.onScroll);
     }
-
     this.scroller = getScroller(this.view);
-
     if (this.scroller && this.onScroll) {
       this.scroller.addEventListener("scroll", this.onScroll, { passive: true });
     }
   }
-
   refreshCurrentSearch(options = {}) {
     if (!this.barEl) return;
     const query = this.input ? this.input.value : this.query;
     if (query) this.search(query, options);
     else this.clearHighlights();
   }
-
   flushInputSearch() {
     if (this.onInput && this.onInput.cancel) this.onInput.cancel();
     if (this.input) this.search(this.input.value);
   }
-
   closestMatchIndex(previousMatch, previousCurrent) {
     if (!this.matches.length) return -1;
     if (!previousMatch) {
       return Math.min(Math.max(previousCurrent, 0), this.matches.length - 1);
     }
-
     let bestIndex = 0;
     let bestDistance = Infinity;
     this.matches.forEach((m, i) => {
-      const distance =
-        Math.abs(m.line - previousMatch.line) * 100000 +
-        Math.abs(m.ch - previousMatch.ch);
+      const distance = Math.abs(m.line - previousMatch.line) * 1e5 + Math.abs(m.ch - previousMatch.ch);
       if (distance < bestDistance) {
         bestDistance = distance;
         bestIndex = i;
@@ -1185,7 +1399,6 @@ class FindBar {
     });
     return bestIndex;
   }
-
   /**
    * Best-effort source line currently at the center of the viewport. Used to
    * start a fresh search near what the user is reading instead of always
@@ -1194,8 +1407,6 @@ class FindBar {
    */
   anchorLineFromViewport() {
     try {
-      // Reading mode: the preview renderer reports scroll as a (fractional)
-      // source-line number, symmetric with applyScroll(line).
       if (this.view.getMode() === "preview") {
         const pm = this.view.previewMode || this.view.currentMode;
         const renderer = pm && pm.renderer;
@@ -1204,10 +1415,8 @@ class FindBar {
         else if (pm && typeof pm.getScroll === "function") s = pm.getScroll();
         return Number.isFinite(s) ? Math.max(0, Math.round(s)) : null;
       }
-
-      // Editor (source / live preview): map the viewport center to a line.
       const cm = getEditorView(this.editor);
-      const scroller = getScroller(this.view) || (cm && cm.scrollDOM);
+      const scroller = getScroller(this.view) || cm && cm.scrollDOM;
       if (!cm || !scroller || typeof cm.posAtCoords !== "function") return null;
       const rect = scroller.getBoundingClientRect();
       const y = rect.top + rect.height / 2;
@@ -1222,7 +1431,6 @@ class FindBar {
       return null;
     }
   }
-
   /** Index of the match whose source line is nearest `line`; 0 if unknown. */
   nearestMatchIndexToLine(line) {
     if (line == null || !this.matches.length) return 0;
@@ -1230,7 +1438,7 @@ class FindBar {
     let bestDist = Infinity;
     for (let i = 0; i < this.matches.length; i++) {
       const m = this.matches[i];
-      const dist = Math.abs(m.line - line) * 100000 + m.ch;
+      const dist = Math.abs(m.line - line) * 1e5 + m.ch;
       if (dist < bestDist) {
         bestDist = dist;
         best = i;
@@ -1238,7 +1446,6 @@ class FindBar {
     }
     return best;
   }
-
   syncToggleButtons() {
     if (this.caseBtn) this.caseBtn.toggleClass("is-on", this.caseSensitive);
     if (this.regexBtn) this.regexBtn.toggleClass("is-on", this.useRegex);
@@ -1249,12 +1456,9 @@ class FindBar {
       this.groupBtn.setText(
         this.groupResults ? headingLevelLabel(this.headingGroupLevel) : "H-"
       );
-      this.groupBtn.title = this.groupResults
-        ? `Grouped by ${headingLevelMenuLabel(this.headingGroupLevel)}`
-        : "Group results by heading";
+      this.groupBtn.title = this.groupResults ? `Grouped by ${headingLevelMenuLabel(this.headingGroupLevel)}` : "Group results by heading";
     }
   }
-
   persistFindOptions() {
     if (this.plugin && typeof this.plugin.saveFindOptions === "function") {
       this.plugin.saveFindOptions({
@@ -1264,11 +1468,10 @@ class FindBar {
         groupResults: this.groupResults,
         headingGroupLevel: this.headingGroupLevel,
         showResultHeadings: this.showResultHeadings,
-        jumpNearest: this.jumpNearest,
+        jumpNearest: this.jumpNearest
       });
     }
   }
-
   setSearchOption(name, value) {
     this[name] = value;
     this.syncToggleButtons();
@@ -1276,7 +1479,6 @@ class FindBar {
     this.search(this.input.value);
     this.input.focus();
   }
-
   setHeadingGrouping(groupResults, headingGroupLevel = this.headingGroupLevel) {
     this.groupResults = !!groupResults;
     this.headingGroupLevel = normalizeHeadingGroupLevel(headingGroupLevel);
@@ -1288,7 +1490,6 @@ class FindBar {
     this.markActiveRow();
     if (this.input) this.input.focus();
   }
-
   setResultHeadingDisplay(showResultHeadings) {
     this.showResultHeadings = !!showResultHeadings;
     this.syncToggleButtons();
@@ -1297,36 +1498,25 @@ class FindBar {
     this.markActiveRow();
     if (this.input) this.input.focus();
   }
-
   showHeadingGroupMenu(evt) {
     evt.preventDefault();
-    const menu = new Menu();
+    const menu = new import_obsidian.Menu();
     menu.addItem((item) => {
-      item
-        .setTitle("Show row headings")
-        .setChecked(this.showResultHeadings)
-        .onClick(() => this.setResultHeadingDisplay(!this.showResultHeadings));
+      item.setTitle("Show row headings").setChecked(this.showResultHeadings).onClick(() => this.setResultHeadingDisplay(!this.showResultHeadings));
     });
     if (typeof menu.addSeparator === "function") menu.addSeparator();
     menu.addItem((item) => {
-      item
-        .setTitle("Group: Off")
-        .setChecked(!this.groupResults)
-        .onClick(() => this.setHeadingGrouping(false));
+      item.setTitle("Group: Off").setChecked(!this.groupResults).onClick(() => this.setHeadingGrouping(false));
     });
     if (typeof menu.addSeparator === "function") menu.addSeparator();
     const levels = [1, 2, 3, 4, 5, 6];
     for (const level of levels) {
       menu.addItem((item) => {
-        item
-          .setTitle(`Group by ${headingLevelMenuLabel(level)}`)
-          .setChecked(this.groupResults && this.headingGroupLevel === level)
-          .onClick(() => this.setHeadingGrouping(true, level));
+        item.setTitle(`Group by ${headingLevelMenuLabel(level)}`).setChecked(this.groupResults && this.headingGroupLevel === level).onClick(() => this.setHeadingGrouping(true, level));
       });
     }
     menu.showAtMouseEvent(evt);
   }
-
   open() {
     if (this.barEl) {
       this.input.focus();
@@ -1334,15 +1524,13 @@ class FindBar {
       return;
     }
     const host = this.view.containerEl;
-
     const bar = host.createDiv({ cls: "lf-find-bar" });
     this.barEl = bar;
     this.input = bar.createEl("input", {
       cls: "lf-input",
       type: "text",
-      placeholder: "Search current note...",
+      placeholder: "Search current note..."
     });
-
     this.caseBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "Aa" });
     this.caseBtn.title = "Match case";
     this.regexBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: ".*" });
@@ -1350,25 +1538,22 @@ class FindBar {
     this.wordBtn = bar.createEl("button", { cls: "lf-btn lf-toggle", text: "W" });
     this.wordBtn.title = "Match whole word";
     this.nearestBtn = bar.createEl("button", { cls: "lf-btn lf-toggle" });
-    setIcon(this.nearestBtn, "locate-fixed");
-    this.nearestBtn.title =
-      "Jump to the match nearest the current view (off: always jump to the first match)";
+    (0, import_obsidian.setIcon)(this.nearestBtn, "locate-fixed");
+    this.nearestBtn.title = "Jump to the match nearest the current view (off: always jump to the first match)";
     this.groupBtn = bar.createEl("button", { cls: "lf-btn lf-toggle lf-heading-toggle", text: "H-" });
     this.groupBtn.title = "Group results by heading";
     this.syncToggleButtons();
-
     this.countEl = bar.createSpan({ cls: "lf-count", text: "" });
     this.sepEl = bar.createDiv({ cls: "lf-sep" });
     const prev = bar.createEl("button", { cls: "lf-btn" });
     const next = bar.createEl("button", { cls: "lf-btn" });
     const close = bar.createEl("button", { cls: "lf-btn" });
-    setIcon(prev, "chevron-up");
-    setIcon(next, "chevron-down");
-    setIcon(close, "x");
-    prev.title = "Previous (Shift+Enter / ↑)";
-    next.title = "Next (Enter / ↓)";
+    (0, import_obsidian.setIcon)(prev, "chevron-up");
+    (0, import_obsidian.setIcon)(next, "chevron-down");
+    (0, import_obsidian.setIcon)(close, "x");
+    prev.title = "Previous (Shift+Enter / \u2191)";
+    next.title = "Next (Enter / \u2193)";
     close.title = "Close (Esc)";
-
     prev.onclick = () => this.step(-1);
     next.onclick = () => this.step(1);
     close.onclick = () => this.close();
@@ -1385,18 +1570,23 @@ class FindBar {
       this.setSearchOption("jumpNearest", !this.jumpNearest);
     };
     this.groupBtn.onclick = (evt) => this.showHeadingGroupMenu(evt);
-
     this.resultsEl = host.createDiv({ cls: "lf-results" });
     this.resultsEl.style.display = "none";
-    this.setupResultObserver();
-    this.updateCount(); // collapse the empty count/separator on open
-
+    this.resultList = new VirtualResultList({
+      container: this.resultsEl,
+      getCurrent: () => this.current,
+      getGroupInfo: () => this.getMatchGroupInfo(),
+      onAfterRender: () => this.updateGroupCounts(),
+      renderRow: (index, groupInfo, state) => this.createResultRow(index, groupInfo, state)
+    });
+    this.updateCount();
     this.onInput = debounce(
       () => this.search(this.input.value),
       DEBOUNCE_MS
     );
     this.input.addEventListener("input", this.onInput);
     this.onPaste = (e) => {
+      var _a, _b;
       if (this.useRegex || !e.clipboardData) {
         setTimeout(() => this.flushInputSearch(), 0);
         return;
@@ -1408,15 +1598,13 @@ class FindBar {
         return;
       }
       e.preventDefault();
-      const start = this.input.selectionStart ?? this.input.value.length;
-      const end = this.input.selectionEnd ?? start;
+      const start = (_a = this.input.selectionStart) != null ? _a : this.input.value.length;
+      const end = (_b = this.input.selectionEnd) != null ? _b : start;
       this.input.setRangeText(trimmed, start, end, "end");
       this.flushInputSearch();
     };
     this.input.addEventListener("paste", this.onPaste);
     this.onKeydown = (e) => {
-      // Don't hijack keys while an IME is composing (e.g. Chinese pinyin Enter
-      // commits the candidate — we'd otherwise step the search).
       if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") {
         e.preventDefault();
@@ -1433,15 +1621,10 @@ class FindBar {
       }
     };
     this.input.addEventListener("keydown", this.onKeydown);
-
-    this.onScroll = debounce(
-      () => this.refreshHighlights(),
-      DEBOUNCE_MS
+    this.onScroll = throttleFrame(
+      () => this.refreshHighlights(this.highlightToken, { fromScroll: true })
     );
     this.updateScroller();
-
-    // Re-run search when the user toggles Source / Live Preview / Reading
-    // inside the same tab, so domMode, highlights and snippets stay accurate.
     this.lastViewMode = this.viewModeKey();
     this.layoutEvt = this.plugin.app.workspace.on("layout-change", () => {
       if (!this.barEl) return;
@@ -1451,11 +1634,9 @@ class FindBar {
       this.updateScroller();
       this.refreshCurrentSearch({ preserveCurrent: true });
     });
-
-    // Keep results in sync if the note is edited while the find bar is open.
     this.onEditorChange = debounce(() => {
       if (!this.barEl) return;
-      const active = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+      const active = this.plugin.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
       if (active !== this.view) return;
       this.refreshCurrentSearch({ preserveCurrent: true, jump: false });
     }, DEBOUNCE_MS);
@@ -1463,8 +1644,6 @@ class FindBar {
       "editor-change",
       this.onEditorChange
     );
-
-    // Prefill from the current selection, like a browser / editor find.
     let initial = "";
     try {
       const sel = this.editor.getSelection();
@@ -1482,13 +1661,11 @@ class FindBar {
       this.input.select();
     }, 0);
   }
-
   close() {
     if (this.onInput && this.onInput.cancel) this.onInput.cancel();
     if (this.onScroll && this.onScroll.cancel) this.onScroll.cancel();
     if (this.onEditorChange && this.onEditorChange.cancel)
       this.onEditorChange.cancel();
-
     if (this.input && this.onInput) {
       this.input.removeEventListener("input", this.onInput);
     }
@@ -1498,18 +1675,16 @@ class FindBar {
     if (this.input && this.onKeydown) {
       this.input.removeEventListener("keydown", this.onKeydown);
     }
-
     if (this.scroller && this.onScroll) {
       this.scroller.removeEventListener("scroll", this.onScroll);
     }
     this.scroller = null;
-    this.disconnectResultObserver();
-
+    if (this.resultList) this.resultList.destroy();
+    this.resultList = null;
     if (this.layoutEvt) this.plugin.app.workspace.offref(this.layoutEvt);
     if (this.editorChangeEvt) this.plugin.app.workspace.offref(this.editorChangeEvt);
     this.layoutEvt = null;
     this.editorChangeEvt = null;
-
     this.clearHighlights();
     this.nextHighlightToken();
     if (this.barEl) this.barEl.remove();
@@ -1523,90 +1698,42 @@ class FindBar {
     this.onEditorChange = null;
     this.matches = [];
     this.current = -1;
-    this.query = ""; // ensure late timers can't repaint highlights
+    this.query = "";
     this.matcher = null;
-    this.cancelResultPrefetch();
-    this.cancelResultCatchup();
-    this.resultRenderLimit = RESULT_RENDER_BATCH;
-    this.renderedResultCount = 0;
-    this.renderedGroupKey = null;
-    this.activeResultRow = null;
-    this.resultSentinelEl = null;
-    this.resultSpacerEl = null;
-    this.resultAverageRowHeight = DEFAULT_RESULT_ROW_HEIGHT;
+    this.tableLookup = null;
+    this.headingLookup = null;
+    this.snippetCache = /* @__PURE__ */ new Map();
   }
-
   clearHighlights() {
-    const registries = [this.highlightRegistry];
-    const support = getHighlightSupport(this.view);
-    if (support) registries.push(support.registry);
-
-    const seen = new Set();
-    for (const registry of registries) {
-      if (!registry || seen.has(registry)) continue;
-      seen.add(registry);
-      registry.delete(HL_ALL);
-      registry.delete(HL_CURRENT);
-    }
+    clearHighlights(this.view, this.highlightRegistry);
     this.highlightRegistry = null;
   }
-
   domApply(dom, currentRange) {
-    const support = getHighlightSupport(this.view);
-    if (!support) return;
-    if (this.highlightRegistry && this.highlightRegistry !== support.registry) {
-      this.highlightRegistry.delete(HL_ALL);
-      this.highlightRegistry.delete(HL_CURRENT);
-    }
-    this.highlightRegistry = support.registry;
-
-    support.registry.set(
-      HL_ALL,
-      new support.Highlight(...dom.map((d) => d.range))
-    );
-    if (currentRange) {
-      const hl = new support.Highlight(currentRange);
-      hl.priority = 1;
-      support.registry.set(HL_CURRENT, hl);
-    } else {
-      support.registry.delete(HL_CURRENT);
-    }
+    const registry = applyHighlights(this.view, this.highlightRegistry, dom, currentRange);
+    if (registry) this.highlightRegistry = registry;
   }
-
-  refreshHighlights(token = this.highlightToken) {
+  refreshHighlights(token = this.highlightToken, options = {}) {
     if (token !== this.highlightToken) return null;
-    if (!this.barEl) return null; // bail if a late timer fires after close()
+    if (!this.barEl) return null;
     if (!getHighlightSupport(this.view)) return null;
     if (!this.query || !this.matcher || this.matcher.invalid)
       return this.clearHighlights(), null;
-
-    // Reading mode: list/count/nav come from the source (complete). The current
-    // match is mapped to the rendered DOM by content (exact, even with duplicate
-    // cells). Yellow highlights are limited around the current match, not just
-    // the first N matches in the document.
+    const fromScroll = !!options.fromScroll;
     if (this.domMode) {
-      const root = getRenderRoot(this.view);
-      const m = this.matches[this.current];
-      const scroller = getScroller(this.view);
-      let cur = m
-        ? resolveReadingCurrentRange(root, this.docLines, m, this.matcher, scroller)
-        : null;
-      if (
-        !cur &&
-        this.currentDomRange &&
-        this.currentDomRange.startContainer &&
-        this.currentDomRange.startContainer.isConnected
-      )
+      const root2 = getRenderRoot(this.view);
+      const m2 = this.matches[this.current];
+      const scroller2 = getScroller(this.view);
+      let cur = m2 ? resolveReadingCurrentRange(root2, this.docLines, m2, this.matcher, scroller2) : null;
+      if (!cur && this.currentDomRange && this.currentDomRange.startContainer && this.currentDomRange.startContainer.isConnected)
         cur = this.currentDomRange;
-
-      let dom = findRenderedMatches(root, this.matcher);
-
-      if (!cur && dom.length) {
-        const rect = scroller ? scroller.getBoundingClientRect() : { top: 0 };
+      const domOptions2 = fromScroll || options.viewportOnly ? { scroller: scroller2, viewportMargin: 3e3 } : {};
+      let dom2 = findRenderedMatches(root2, this.matcher, domOptions2);
+      if (!cur && dom2.length) {
+        const rect = scroller2 ? scroller2.getBoundingClientRect() : { top: 0 };
         const targetY = rect.top + 80;
         let best = null;
         let bd = Infinity;
-        for (const d of dom) {
+        for (const d of dom2) {
           const r = d.range.getBoundingClientRect();
           const dist = Math.abs(r.top - targetY);
           if (dist < bd) {
@@ -1616,18 +1743,16 @@ class FindBar {
         }
         cur = best ? best.range : null;
       }
-
       this.currentDomRange = cur;
-      dom = limitDomHighlightsAroundCurrent(
-        dom,
+      dom2 = limitDomHighlightsAroundCurrent(
+        dom2,
         cur,
         MAX_DOM_HIGHLIGHTS,
-        scroller
+        scroller2
       );
-      this.domApply(dom, cur);
+      this.domApply(dom2, cur);
       return cur;
     }
-
     const root = getRenderRoot(this.view);
     const scroller = getScroller(this.view);
     let dom = null;
@@ -1636,7 +1761,7 @@ class FindBar {
     const lines = this.docLines || [];
     if (m) {
       const line = lines[m.line] || "";
-      const isTable = !!locateInTables(lines, m.line) && !isDelimiterRow(line);
+      const isTable = !!locateInTables(lines, m.line, this.tableLookup) && !isDelimiterRow(line);
       const cm = getEditorView(this.editor);
       let off = null;
       try {
@@ -1644,13 +1769,13 @@ class FindBar {
       } catch (e) {
         debugWarn("posToOffset", e);
       }
-
       if (off != null && cm) {
         if (isTable)
           currentRange = resolveTableByPoint(cm, off, lines, m, this.matcher);
         if (!currentRange) currentRange = resolveByDomAtPos(cm, off, this.matcher);
         if (!currentRange) {
-          dom = findRenderedMatches(root, this.matcher);
+          const domOptions2 = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3e3 } : {};
+          dom = findRenderedMatches(root, this.matcher, domOptions2);
           let coords = null;
           try {
             if (typeof cm.coordsAtPos === "function") coords = cm.coordsAtPos(off);
@@ -1664,8 +1789,7 @@ class FindBar {
             let bestDist = Infinity;
             for (const d of dom) {
               const r = d.range.getBoundingClientRect();
-              const dist =
-                Math.abs((r.top + r.bottom) / 2 - cy) * 4 + Math.abs(r.left - cx);
+              const dist = Math.abs((r.top + r.bottom) / 2 - cy) * 4 + Math.abs(r.left - cx);
               if (dist < bestDist) {
                 bestDist = dist;
                 best = d;
@@ -1676,8 +1800,8 @@ class FindBar {
         }
       }
     }
-
-    if (!dom) dom = findRenderedMatches(root, this.matcher);
+    const domOptions = fromScroll || options.viewportOnly ? { scroller, viewportMargin: 3e3 } : {};
+    if (!dom) dom = findRenderedMatches(root, this.matcher, domOptions);
     this.currentDomRange = currentRange;
     dom = limitDomHighlightsAroundCurrent(
       dom,
@@ -1688,11 +1812,9 @@ class FindBar {
     this.domApply(dom, currentRange);
     return currentRange;
   }
-
   revealCurrentMatch(token = this.highlightToken) {
-    const range = this.refreshHighlights(token);
+    const range = this.refreshHighlights(token, { viewportOnly: true });
     if (range && scrollRangeIntoView(range)) return;
-
     const m = this.matches[this.current];
     if (!m || this.domMode) return;
     try {
@@ -1705,33 +1827,29 @@ class FindBar {
       debugWarn("reveal current fallback", e);
     }
   }
-
   search(query, options = {}) {
     if (!this.barEl || !this.resultsEl) return;
-
     const previousCurrent = this.current;
     const previousMatch = options.preserveCurrent ? this.matches[previousCurrent] : null;
     const shouldJump = options.jump !== false;
     const effectiveQuery = this.useRegex ? query : normalizePlainQuery(query);
-
     this.query = effectiveQuery;
     this.matcher = buildMatcher(effectiveQuery, this.caseSensitive, this.useRegex, this.wholeWord);
     this.domMode = this.view.getMode() === "preview";
     this.renderedTextMode = this.domMode || isLivePreviewMode(this.view);
-    // Both modes: complete whole-note search from the source.
     const text = this.editor.getValue();
     this.docLines = text.split("\n");
+    this.tableLookup = buildTableLookup(this.docLines);
+    this.headingLookup = buildHeadingLookup(this.docLines);
+    this.snippetCache = /* @__PURE__ */ new Map();
     this.matches = findSourceMatches(this.docLines, this.matcher);
     this.matchGroupInfo = null;
-    // Rendered modes hide some Markdown source syntax. Drop matches inside
-    // those hidden ranges so jump/search defaults land on visible text.
     if (this.renderedTextMode && this.matches.length) {
-      const cache = new Map();
+      const cache = /* @__PURE__ */ new Map();
       this.matches = this.matches.filter((m) => {
         const line = this.docLines[m.line] || "";
         if (isDelimiterRow(line)) return false;
         if (!cleanSnippet(line)) return false;
-
         let spans = cache.get(m.line);
         if (!spans) {
           spans = hiddenSpansInReading(line);
@@ -1740,14 +1858,7 @@ class FindBar {
         return !isInsideSpan(m.ch, spans);
       });
     }
-    this.current = this.matches.length
-      ? options.preserveCurrent
-        ? this.closestMatchIndex(previousMatch, previousCurrent)
-        : this.jumpNearest
-          ? this.nearestMatchIndexToLine(this.anchorLineFromViewport())
-          : 0
-      : -1;
-    this.resultRenderLimit = RESULT_RENDER_BATCH;
+    this.current = this.matches.length ? options.preserveCurrent ? this.closestMatchIndex(previousMatch, previousCurrent) : this.jumpNearest ? this.nearestMatchIndexToLine(this.anchorLineFromViewport()) : 0 : -1;
     this.currentDomRange = null;
     this.renderList();
     this.updateCount();
@@ -1756,7 +1867,6 @@ class FindBar {
     else if (this.current >= 0) this.refreshHighlights(token);
     else this.clearHighlights();
   }
-
   step(dir) {
     if (!this.matches.length) return;
     this.current = (this.current + dir + this.matches.length) % this.matches.length;
@@ -1764,13 +1874,10 @@ class FindBar {
     this.updateCount();
     this.markActiveRow();
   }
-
   jumpToCurrent(token = this.nextHighlightToken()) {
     const m = this.matches[this.current];
     if (!m) return;
     if (this.domMode) {
-      // Scroll the rendered preview to the match's source line, then let
-      // refreshHighlights map the current match by content.
       try {
         const pm = this.view.previewMode || this.view.currentMode;
         const renderer = pm && pm.renderer;
@@ -1784,7 +1891,7 @@ class FindBar {
       } catch (e) {
         debugWarn("applyScroll", e);
       }
-      this.currentDomRange = null; // recompute fresh for the new selection
+      this.currentDomRange = null;
       this.revealCurrentMatch(token);
       setTimeout(() => this.revealCurrentMatch(token), 90);
       setTimeout(() => this.revealCurrentMatch(token), 220);
@@ -1802,15 +1909,10 @@ class FindBar {
     }
     try {
       const cm = getEditorView(this.editor);
-      if (
-        cm &&
-        typeof cm.dispatch === "function" &&
-        fromOffset != null &&
-        toOffset != null
-      ) {
+      if (cm && typeof cm.dispatch === "function" && fromOffset != null && toOffset != null) {
         cm.dispatch({
           selection: { anchor: fromOffset, head: toOffset },
-          scrollIntoView: true,
+          scrollIntoView: true
         });
       } else if (typeof this.editor.setSelection === "function") {
         this.editor.setSelection(from, to);
@@ -1834,7 +1936,6 @@ class FindBar {
     setTimeout(() => this.revealCurrentMatch(token), 60);
     setTimeout(() => this.revealCurrentMatch(token), 180);
   }
-
   updateCount() {
     if (!this.countEl || !this.sepEl) return;
     if (!this.query) {
@@ -1862,28 +1963,21 @@ class FindBar {
     this.countEl.setText(`${this.current + 1}/${this.matches.length}`);
     this.updateGroupCounts();
   }
-
   getMatchGroupInfo() {
     if (!this.groupResults || !this.matches.length) return null;
-    if (
-      this.matchGroupInfo &&
-      this.matchGroupInfo.matchCount === this.matches.length &&
-      this.matchGroupInfo.headingGroupLevel === this.headingGroupLevel
-    ) {
+    if (this.matchGroupInfo && this.matchGroupInfo.matchCount === this.matches.length && this.matchGroupInfo.headingGroupLevel === this.headingGroupLevel) {
       return this.matchGroupInfo;
     }
-
     const groupLevel = normalizeHeadingGroupLevel(this.headingGroupLevel);
-    const groups = this.matches.map((m) =>
-      headingGroupForLine(this.docLines || [], m.line, groupLevel)
+    const groups = this.matches.map(
+      (m) => headingGroupForLine(this.docLines || [], m.line, groupLevel, this.headingLookup)
     );
-    const totals = new Map();
+    const totals = /* @__PURE__ */ new Map();
     for (const group of groups) {
       const key = headingGroupKey(group);
       totals.set(key, (totals.get(key) || 0) + 1);
     }
-
-    const seen = new Map();
+    const seen = /* @__PURE__ */ new Map();
     const items = groups.map((group) => {
       const key = headingGroupKey(group);
       const indexInGroup = (seen.get(key) || 0) + 1;
@@ -1892,358 +1986,94 @@ class FindBar {
         group,
         key,
         indexInGroup,
-        totalInGroup: totals.get(key) || 0,
+        totalInGroup: totals.get(key) || 0
       };
     });
-
     this.matchGroupInfo = {
       headingGroupLevel: this.headingGroupLevel,
       matchCount: this.matches.length,
       items,
-      totals,
+      totals
     };
     return this.matchGroupInfo;
   }
-
   renderList() {
     const el = this.resultsEl;
-    if (!el) return;
-    this.resultRenderToken += 1;
-    this.cancelResultPrefetch();
-    this.cancelResultCatchup();
-    this.clearResultTail();
-    el.empty();
-    this.renderedResultCount = 0;
-    this.renderedGroupKey = null;
-    this.activeResultRow = null;
+    if (!el || !this.resultList) return;
     if (!this.query || !this.matches.length) {
+      this.resultList.clear();
       el.style.display = "none";
       return;
     }
     el.style.display = "block";
-    el.scrollTop = 0;
-    this.resultRenderLimit = Math.min(
-      this.matches.length,
-      Math.max(this.resultRenderLimit || RESULT_RENDER_BATCH, RESULT_RENDER_BATCH)
-    );
-    this.renderResultChunk(this.resultRenderLimit);
-    this.markActiveRow({ scroll: false });
-    this.scheduleResultPrefetch();
+    this.resultList.setItems(this.matches.length, this.current);
   }
-
-  renderResultChunk(targetCount) {
+  createResultRow(i, groupInfo, state) {
     const el = this.resultsEl;
-    if (!el || !this.matches.length) return false;
-
-    const groupInfo = this.getMatchGroupInfo();
-    const start = this.renderedResultCount || 0;
-    const end = Math.min(this.matches.length, targetCount);
-    if (end <= start) return false;
-    this.clearResultTail();
-    const beforeHeight = el.scrollHeight;
-
-    let lastGroupKey = this.renderedGroupKey;
-    for (let i = start; i < end; i++) {
-      const m = this.matches[i];
-      const groupItem = groupInfo ? groupInfo.items[i] : null;
-      const group = groupItem ? groupItem.group : null;
-      if (groupItem) {
-        if (groupItem.key !== lastGroupKey) {
-          lastGroupKey = groupItem.key;
-          const groupEl = el.createDiv({ cls: "lf-group" });
-          groupEl.dataset.groupKey = groupItem.key;
-          groupEl.dataset.groupTitle = group.text;
-          groupEl.dataset.groupTotal = String(groupItem.totalInGroup);
-          groupEl.createSpan({ cls: "lf-group-title", text: group.text });
-          groupEl.createSpan({
-            cls: "lf-group-count",
-            text: String(groupItem.totalInGroup),
-          });
-        }
-      }
-
-      const row = el.createDiv({ cls: "lf-row" });
-      row.dataset.matchIndex = String(i);
-      if (i === this.current) {
-        row.addClass("is-active");
-        this.activeResultRow = row;
-      }
-
-      // Second line: nearest precise heading above this match.
-      const head = this.showResultHeadings ? nearestHeading(this.docLines, m.line) : null;
-      if (head) row.addClass("has-head");
-
-      const main = row.createDiv({ cls: "lf-main" });
-      main.createSpan({ cls: "lf-line", text: `Line ${m.line + 1}` });
-      const sn = main.createSpan({ cls: "lf-snippet" });
-
-      const snippet = buildSnippetData(
+    if (!el) return null;
+    const m = this.matches[i];
+    const groupItem = groupInfo ? groupInfo.items[i] : null;
+    const group = groupItem ? groupItem.group : null;
+    if (groupItem && groupItem.key !== state.lastGroupKey) {
+      state.lastGroupKey = groupItem.key;
+      const groupEl = el.createDiv({ cls: "lf-group" });
+      groupEl.dataset.groupKey = groupItem.key;
+      groupEl.dataset.groupTitle = group.text;
+      groupEl.dataset.groupTotal = String(groupItem.totalInGroup);
+      groupEl.createSpan({ cls: "lf-group-title", text: group.text });
+      groupEl.createSpan({
+        cls: "lf-group-count",
+        text: String(groupItem.totalInGroup)
+      });
+    }
+    const row = el.createDiv({ cls: "lf-row" });
+    row.dataset.matchIndex = String(i);
+    const head = this.showResultHeadings ? nearestHeading(this.docLines, m.line, 6, this.headingLookup) : null;
+    if (head) row.addClass("has-head");
+    const main = row.createDiv({ cls: "lf-main" });
+    main.createSpan({ cls: "lf-line", text: `Line ${m.line + 1}` });
+    const sn = main.createSpan({ cls: "lf-snippet" });
+    let snippet = this.snippetCache.get(i);
+    if (snippet === void 0) {
+      snippet = buildSnippetData(
         m,
         this.docLines || [],
         this.matcher,
-        this.renderedTextMode
+        this.renderedTextMode,
+        this.tableLookup
       );
-      if (snippet) {
-        appendHighlightedSnippet(
-          sn,
-          snippet.source,
-          snippet.hitIdx,
-          snippet.hitLen,
-          snippet.keepShort
-        );
-      }
-
-      if (head && (!group || head.line !== group.line)) {
-        row.createDiv({ cls: "lf-head" }).setText(cleanHeadingText(head.text));
-      }
-
-      row.onclick = () => {
-        this.current = i;
-        this.jumpToCurrent(this.nextHighlightToken());
-        this.updateCount();
-        this.markActiveRow();
-        if (this.input) this.input.focus(); // keep keyboard nav alive
-      };
+      this.snippetCache.set(i, snippet || null);
     }
-
-    this.renderedResultCount = end;
-    this.renderedGroupKey = lastGroupKey;
-    this.updateAverageResultHeight(el.scrollHeight - beforeHeight, end - start);
-    this.updateResultTail();
-    return true;
-  }
-
-  ensureResultRendered(index) {
-    if (index < 0 || index >= this.matches.length) return false;
-    if (index < (this.renderedResultCount || 0)) return true;
-    if (index >= (this.renderedResultCount || 0) + RESULT_RENDER_BATCH) {
-      return false;
-    }
-    this.resultRenderLimit = Math.min(
-      this.matches.length,
-      Math.max(index + 1, (this.renderedResultCount || 0) + RESULT_RENDER_BATCH)
-    );
-    const changed = this.renderResultChunk(this.resultRenderLimit);
-    if (changed) this.updateGroupCounts();
-    return index < (this.renderedResultCount || 0);
-  }
-
-  setupResultObserver() {
-    const el = this.resultsEl;
-    if (!el) return;
-    this.disconnectResultObserver();
-
-    this.onResultsScroll = () => this.maybeRenderMoreResults();
-    el.addEventListener("scroll", this.onResultsScroll, { passive: true });
-
-    const win = getElementWindow(el);
-    if (win && typeof win.IntersectionObserver === "function") {
-      this.resultObserver = new win.IntersectionObserver(
-        (entries) => {
-          if (entries.some((entry) => entry.isIntersecting)) {
-            this.maybeRenderMoreResults({ force: true });
-          }
-        },
-        {
-          root: el,
-          rootMargin: `0px 0px ${RESULT_RENDER_AHEAD_PX}px 0px`,
-          threshold: 0,
-        }
+    if (snippet) {
+      appendHighlightedSnippet(
+        sn,
+        snippet.source,
+        snippet.hitIdx,
+        snippet.hitLen,
+        snippet.keepShort
       );
     }
-  }
-
-  disconnectResultObserver() {
-    if (this.resultObserver) this.resultObserver.disconnect();
-    this.resultObserver = null;
-
-    if (this.resultsEl && this.onResultsScroll) {
-      this.resultsEl.removeEventListener("scroll", this.onResultsScroll);
+    if (head && (!group || head.line !== group.line)) {
+      row.createDiv({ cls: "lf-head" }).setText(cleanHeadingText(head.text));
     }
-    this.onResultsScroll = null;
-    this.resultSentinelEl = null;
-    this.resultSpacerEl = null;
-  }
-
-  clearResultTail() {
-    if (this.resultSentinelEl) {
-      if (this.resultObserver) this.resultObserver.unobserve(this.resultSentinelEl);
-      this.resultSentinelEl.remove();
-      this.resultSentinelEl = null;
-    }
-    if (this.resultSpacerEl) {
-      this.resultSpacerEl.remove();
-      this.resultSpacerEl = null;
-    }
-  }
-
-  updateAverageResultHeight(addedHeight, addedMatches) {
-    if (addedMatches <= 0 || addedHeight <= 0) return;
-    const sample = addedHeight / addedMatches;
-    if (!Number.isFinite(sample) || sample < 12) return;
-    const current = this.resultAverageRowHeight || DEFAULT_RESULT_ROW_HEIGHT;
-    this.resultAverageRowHeight = current * 0.65 + sample * 0.35;
-  }
-
-  updateResultTail() {
-    const el = this.resultsEl;
-    if (!el || !this.matches.length) return;
-    this.clearResultTail();
-    if ((this.renderedResultCount || 0) >= this.matches.length) return;
-
-    this.resultSentinelEl = el.createDiv({ cls: "lf-sentinel" });
-    if (this.resultObserver) {
-      this.resultObserver.observe(this.resultSentinelEl);
-    }
-    const remaining = Math.max(
-      0,
-      this.matches.length - (this.renderedResultCount || 0)
-    );
-    this.resultSpacerEl = el.createDiv({ cls: "lf-spacer" });
-    this.resultSpacerEl.style.height = `${Math.ceil(
-      remaining * (this.resultAverageRowHeight || DEFAULT_RESULT_ROW_HEIGHT)
-    )}px`;
-  }
-
-  isNearResultsBottom() {
-    const el = this.resultsEl;
-    if (!el) return false;
-    const tailTop = this.resultSentinelEl
-      ? this.resultSentinelEl.offsetTop
-      : el.scrollHeight;
-    return (
-      el.scrollTop + el.clientHeight >=
-      tailTop - RESULT_RENDER_AHEAD_PX
-    );
-  }
-
-  maybeRenderMoreResults(options = {}) {
-    if (
-      !this.resultsEl ||
-      !this.matches.length ||
-      (this.renderedResultCount || 0) >= this.matches.length
-    ) {
-      return;
-    }
-    if (!options.force && !this.isNearResultsBottom()) return;
-
-    const scrollTop = this.resultsEl.scrollTop;
-    this.resultRenderLimit = Math.min(
-      this.matches.length,
-      Math.max(
-        this.resultRenderLimit || RESULT_RENDER_BATCH,
-        (this.renderedResultCount || 0) + RESULT_RENDER_BATCH
-      )
-    );
-    if (this.renderResultChunk(this.resultRenderLimit)) {
-      if (options.preserveScroll !== false) this.resultsEl.scrollTop = scrollTop;
-      this.updateGroupCounts();
-      this.scheduleResultPrefetch();
-      if (this.isNearResultsBottom()) this.scheduleResultCatchup();
-    }
-  }
-
-  scheduleResultPrefetch() {
-    const el = this.resultsEl;
-    if (!el || this.resultPrefetchId != null || !this.matches.length) return;
-
-    const cap = Math.min(this.matches.length, RESULT_IDLE_PREFETCH_LIMIT);
-    if ((this.renderedResultCount || 0) >= cap) return;
-
-    const win = getElementWindow(el);
-    const token = this.resultRenderToken;
-    const run = () => {
-      this.resultPrefetchId = null;
-      this.resultPrefetchKind = null;
-      this.resultPrefetchWindow = null;
-
-      if (
-        token !== this.resultRenderToken ||
-        !this.resultsEl ||
-        !this.matches.length
-      ) {
-        return;
-      }
-
-      const limit = Math.min(this.matches.length, RESULT_IDLE_PREFETCH_LIMIT);
-      if ((this.renderedResultCount || 0) >= limit) return;
-
-      const scrollTop = this.resultsEl.scrollTop;
-      const target = Math.min(
-        limit,
-        (this.renderedResultCount || 0) + RESULT_IDLE_PREFETCH_BATCH
-      );
-      if (this.renderResultChunk(target)) {
-        this.resultsEl.scrollTop = scrollTop;
-        this.updateGroupCounts();
-      }
-      this.scheduleResultPrefetch();
+    row.onclick = () => {
+      this.current = i;
+      this.jumpToCurrent(this.nextHighlightToken());
+      this.updateCount();
+      this.markActiveRow();
+      if (this.input) this.input.focus();
     };
-
-    if (win && typeof win.requestIdleCallback === "function") {
-      this.resultPrefetchKind = "idle";
-      this.resultPrefetchId = win.requestIdleCallback(run, { timeout: 350 });
-    } else {
-      this.resultPrefetchKind = "timeout";
-      this.resultPrefetchId = win.setTimeout(run, 80);
-    }
-    this.resultPrefetchWindow = win;
+    return row;
   }
-
-  cancelResultPrefetch() {
-    if (this.resultPrefetchId == null) return;
-    const win =
-      this.resultPrefetchWindow ||
-      (this.resultsEl ? getElementWindow(this.resultsEl) : null);
-    if (
-      this.resultPrefetchKind === "idle" &&
-      win &&
-      typeof win.cancelIdleCallback === "function"
-    ) {
-      win.cancelIdleCallback(this.resultPrefetchId);
-    } else if (win && typeof win.clearTimeout === "function") {
-      win.clearTimeout(this.resultPrefetchId);
-    }
-    this.resultPrefetchId = null;
-    this.resultPrefetchKind = null;
-    this.resultPrefetchWindow = null;
-  }
-
-  scheduleResultCatchup() {
-    const el = this.resultsEl;
-    if (!el || this.resultCatchupFrame != null) return;
-    const win = getElementWindow(el);
-    this.resultCatchupWindow = win;
-    this.resultCatchupFrame = win.requestAnimationFrame(() => {
-      this.resultCatchupFrame = null;
-      this.resultCatchupWindow = null;
-      this.maybeRenderMoreResults();
-    });
-  }
-
-  cancelResultCatchup() {
-    if (this.resultCatchupFrame == null) return;
-    const win =
-      this.resultCatchupWindow ||
-      (this.resultsEl ? getElementWindow(this.resultsEl) : null);
-    if (win && typeof win.cancelAnimationFrame === "function") {
-      win.cancelAnimationFrame(this.resultCatchupFrame);
-    }
-    this.resultCatchupFrame = null;
-    this.resultCatchupWindow = null;
-  }
-
   setText(el, text) {
     if (!el) return;
     if (typeof el.setText === "function") el.setText(text);
     else el.textContent = text;
   }
-
   updateGroupCounts() {
     if (!this.resultsEl) return;
     const groupInfo = this.getMatchGroupInfo();
     if (!groupInfo) return;
-
     const active = groupInfo.items[this.current];
     const groups = this.resultsEl.querySelectorAll(".lf-group");
     for (const groupEl of groups) {
@@ -2256,87 +2086,58 @@ class FindBar {
         countEl,
         isActive ? `${active.indexInGroup}/${active.totalInGroup}` : String(total)
       );
-      groupEl.title = isActive
-        ? `${active.group.text}: ${active.indexInGroup}/${active.totalInGroup}`
-        : `${groupEl.dataset.groupTitle || "Heading"}: ${total}`;
+      groupEl.title = isActive ? `${active.group.text}: ${active.indexInGroup}/${active.totalInGroup}` : `${groupEl.dataset.groupTitle || "Heading"}: ${total}`;
     }
   }
-
   markActiveRow(options = {}) {
-    if (!this.resultsEl) return;
-    const shouldScroll = options.scroll !== false;
-    this.ensureResultRendered(this.current);
-    const previous =
-      this.activeResultRow && this.activeResultRow.isConnected
-        ? this.activeResultRow
-        : null;
-    const row =
-      this.current >= 0
-        ? this.resultsEl.querySelector(
-            `.lf-row[data-match-index="${this.current}"]`
-          )
-        : null;
-    if (previous && previous !== row) previous.classList.remove("is-active");
-    if (row) {
-      row.classList.add("is-active");
-      if (shouldScroll) row.scrollIntoView({ block: "nearest" });
-    }
-    this.activeResultRow = row || null;
+    if (!this.resultList) return;
+    this.resultList.setActive(this.current, options);
     this.updateGroupCounts();
   }
-}
+};
 
-/* ----------------------------- plugin ----------------------------- */
-
-module.exports = class LiveFindPlugin extends Plugin {
+// src/main.js
+var LiveFindPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     await this.loadPluginData();
-
-
     this.bar = null;
-
     this.addCommand({
       id: "open-find-bar",
       name: "Open find bar",
       callback: () => {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view) return new Notice("Open a Markdown note first.");
+        const view = this.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView);
+        if (!view) return new import_obsidian2.Notice("Open a Markdown note first.");
         if (!getHighlightSupport(view))
-          return new Notice("This Obsidian version lacks the CSS Highlight API.");
+          return new import_obsidian2.Notice("This Obsidian version lacks the CSS Highlight API.");
         if (this.bar && this.bar.view !== view) this.bar.close();
         if (!this.bar || !this.bar.isOpen()) this.bar = new FindBar(this, view);
         this.bar.open();
-      },
+      }
     });
-
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         if (this.bar) this.bar.close();
       })
     );
   }
-
   async loadPluginData() {
     try {
-      this.data = (await this.loadData()) || {};
+      this.data = await this.loadData() || {};
     } catch (e) {
       debugWarn("loadData", e);
       this.data = {};
     }
     this.findOptions = normalizeFindOptions(this.data.findOptions);
   }
-
   getFindOptions() {
     return normalizeFindOptions(this.findOptions);
   }
-
   saveFindOptions(options) {
     this.findOptions = normalizeFindOptions(options);
     const data = this.data && typeof this.data === "object" ? this.data : {};
     this.data = { ...data, findOptions: this.findOptions };
     this.saveData(this.data).catch((e) => debugWarn("save find options", e));
   }
-
   onunload() {
     if (this.bar) this.bar.close();
   }
