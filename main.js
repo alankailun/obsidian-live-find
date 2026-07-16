@@ -28,7 +28,7 @@ var import_obsidian2 = require("obsidian");
 var HL_ALL = "live-find-all";
 var HL_CURRENT = "live-find-current";
 var DEBUG = false;
-var DEBOUNCE_MS = 100;
+var DEBOUNCE_MS = 500;
 var SCROLL_HIGHLIGHT_MIN_INTERVAL_MS = 120;
 var DOM_HIGHLIGHT_VIEWPORT_MARGIN = 6e3;
 var MAX_DOM_HIGHLIGHTS = 2500;
@@ -3135,11 +3135,21 @@ var FindBar = class {
       renderRow: (index, groupInfo, state, parent) => this.createResultRow(index, groupInfo, state, parent)
     });
     this.updateCount();
-    this.onInput = debounce(
-      () => this.search(this.input.value),
-      DEBOUNCE_MS
-    );
+    this.composing = false;
+    this.onInput = debounce(() => {
+      if (this.composing) return;
+      this.search(this.input.value);
+    }, DEBOUNCE_MS);
     this.input.addEventListener("input", this.onInput);
+    this.onCompositionStart = () => {
+      this.composing = true;
+    };
+    this.onCompositionEnd = () => {
+      this.composing = false;
+      this.flushInputSearch();
+    };
+    this.input.addEventListener("compositionstart", this.onCompositionStart);
+    this.input.addEventListener("compositionend", this.onCompositionEnd);
     this.onPaste = (e) => {
       var _a, _b;
       if (this.useRegex || !e.clipboardData) {
@@ -3230,6 +3240,12 @@ var FindBar = class {
     if (this.input && this.onInput) {
       this.input.removeEventListener("input", this.onInput);
     }
+    if (this.input && this.onCompositionStart) {
+      this.input.removeEventListener("compositionstart", this.onCompositionStart);
+    }
+    if (this.input && this.onCompositionEnd) {
+      this.input.removeEventListener("compositionend", this.onCompositionEnd);
+    }
     if (this.input && this.onPaste) {
       this.input.removeEventListener("paste", this.onPaste);
     }
@@ -3256,6 +3272,9 @@ var FindBar = class {
     this.input = null;
     this.onPaste = null;
     this.onKeydown = null;
+    this.onCompositionStart = null;
+    this.onCompositionEnd = null;
+    this.composing = false;
     this.onResultsScroll = null;
     this.onEditorChange = null;
     this.matches = [];

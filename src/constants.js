@@ -4,7 +4,7 @@ export const HL_CURRENT = "live-find-current";
 // Hard-coded knobs. Flip DEBUG to true while developing; the others are
 // reasonable defaults — adjust here if you ever need to tune them.
 export const DEBUG = false;
-export const DEBOUNCE_MS = 100;
+export const DEBOUNCE_MS = 500;
 export const SCROLL_HIGHLIGHT_MIN_INTERVAL_MS = 120;
 export const DOM_HIGHLIGHT_VIEWPORT_MARGIN = 6000;
 export const MAX_DOM_HIGHLIGHTS = 2500;

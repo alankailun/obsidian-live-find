@@ -503,11 +503,25 @@ export class FindBar {
     });
     this.updateCount(); // collapse the empty count/separator on open
 
-    this.onInput = debounce(
-      () => this.search(this.input.value),
-      DEBOUNCE_MS
-    );
+    this.composing = false;
+    this.onInput = debounce(() => {
+      // While an IME is composing (e.g. Chinese pinyin), the field's value
+      // is an in-progress candidate, not real text — searching it would
+      // just chase garbage. Wait for compositionend instead, same as
+      // Chrome's own in-page find.
+      if (this.composing) return;
+      this.search(this.input.value);
+    }, DEBOUNCE_MS);
     this.input.addEventListener("input", this.onInput);
+    this.onCompositionStart = () => {
+      this.composing = true;
+    };
+    this.onCompositionEnd = () => {
+      this.composing = false;
+      this.flushInputSearch();
+    };
+    this.input.addEventListener("compositionstart", this.onCompositionStart);
+    this.input.addEventListener("compositionend", this.onCompositionEnd);
     this.onPaste = (e) => {
       if (this.useRegex || !e.clipboardData) {
         setTimeout(() => this.flushInputSearch(), 0);
@@ -609,6 +623,12 @@ export class FindBar {
     if (this.input && this.onInput) {
       this.input.removeEventListener("input", this.onInput);
     }
+    if (this.input && this.onCompositionStart) {
+      this.input.removeEventListener("compositionstart", this.onCompositionStart);
+    }
+    if (this.input && this.onCompositionEnd) {
+      this.input.removeEventListener("compositionend", this.onCompositionEnd);
+    }
     if (this.input && this.onPaste) {
       this.input.removeEventListener("paste", this.onPaste);
     }
@@ -638,6 +658,9 @@ export class FindBar {
     this.input = null;
     this.onPaste = null;
     this.onKeydown = null;
+    this.onCompositionStart = null;
+    this.onCompositionEnd = null;
+    this.composing = false;
     this.onResultsScroll = null;
     this.onEditorChange = null;
     this.matches = [];
