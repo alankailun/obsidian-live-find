@@ -328,15 +328,54 @@ export class FindBar {
     }
   }
 
-  /** Index of the match whose source line is nearest `line`; 0 if unknown. */
-  nearestMatchIndexToLine(line) {
+  /**
+   * [top, bottom] source lines currently visible in the editor viewport, so
+   * nearestMatchIndexToLine can prefer a match actually on screen over one
+   * that's merely close by raw line count. Null in Reading mode (no
+   * CodeMirror viewport to query) or if it can't be determined.
+   */
+  visibleLineRange() {
+    try {
+      if (this.view.getMode() === "preview") return null;
+      const cm = getEditorView(this.editor);
+      const scroller = getScroller(this.view) || (cm && cm.scrollDOM);
+      if (!cm || !scroller || typeof cm.lineBlockAtHeight !== "function")
+        return null;
+      const top = cm.lineBlockAtHeight(scroller.scrollTop);
+      const bottom = cm.lineBlockAtHeight(
+        Math.max(scroller.scrollTop, scroller.scrollTop + scroller.clientHeight - 1)
+      );
+      const topLine = this.editor.offsetToPos(top.from).line;
+      const bottomLine = this.editor.offsetToPos(bottom.from).line;
+      return [topLine, bottomLine];
+    } catch (e) {
+      debugWarn("visibleLineRange", e);
+      return null;
+    }
+  }
+
+  /**
+   * Index of the match whose source line is nearest `line`; 0 if unknown.
+   * `range` (if given) is the [top, bottom] visible line span — a match
+   * inside it always wins over one merely close by line count, since a big
+   * block of non-matching content (e.g. a wide table) can put two matches
+   * an equal number of lines from the anchor while only one of them is
+   * actually something the user can see.
+   */
+  nearestMatchIndexToLine(line, range = null) {
     if (line == null || !this.matches.length) return 0;
     let best = 0;
     let bestDist = Infinity;
+    let bestInRange = false;
     for (let i = 0; i < this.matches.length; i++) {
       const m = this.matches[i];
+      const inRange = !!range && m.line >= range[0] && m.line <= range[1];
       const dist = Math.abs(m.line - line) * 100000 + m.ch;
-      if (dist < bestDist) {
+      if (inRange && !bestInRange) {
+        bestInRange = true;
+        bestDist = dist;
+        best = i;
+      } else if (inRange === bestInRange && dist < bestDist) {
         bestDist = dist;
         best = i;
       }
@@ -889,7 +928,10 @@ export class FindBar {
       ? options.preserveCurrent
         ? this.closestMatchIndex(previousMatch, previousCurrent)
         : this.jumpNearest
-          ? this.nearestMatchIndexToLine(this.anchorLineFromViewport())
+          ? this.nearestMatchIndexToLine(
+              this.anchorLineFromViewport(),
+              this.visibleLineRange()
+            )
           : 0
       : -1;
     this.currentDomRange = null;
